@@ -93,6 +93,13 @@ jobs:
           echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
           chmod 600 ~/.ssh/id_agent
 
+          # Canonical tmux-submit pattern (C-u clear, prompt + first Enter,
+          # sleep 1 so Claude Code's multi-line TUI settles, second Enter
+          # that actually submits). This pattern is also shipped as a helper
+          # at groundnuty/macf:scripts/tmux-send-to-claude.sh — keep them in
+          # lock-step. A future release will invoke the helper directly once
+          # agent-config.json gains a workspace_dir field (tracked as
+          # follow-up to groundnuty/macf#57).
           if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
             -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
             "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
@@ -189,6 +196,9 @@ jobs:
               echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
               chmod 600 ~/.ssh/id_agent
 
+              # Canonical tmux-submit pattern — keep in sync with
+              # groundnuty/macf:scripts/tmux-send-to-claude.sh. See the
+              # comment above the label-routing ssh for the full rationale.
               if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
                 -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
                 "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
