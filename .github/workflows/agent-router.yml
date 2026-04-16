@@ -89,6 +89,7 @@ jobs:
           WINDOW=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].tmux_window // empty')
           SSH_USER=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].ssh_user')
           TMUX_BIN=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].tmux_bin // "tmux"')
+          WORKSPACE_DIR=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].workspace_dir // empty')
 
           # Build the tmux target: "session" or "session:window" if a
           # tmux_window is configured. Lets multiple peers of one project
@@ -99,25 +100,40 @@ jobs:
             TARGET="$SESSION"
           fi
 
+          PROMPT="Please work on issue #${ISSUE_NUMBER}. Run: gh issue view ${ISSUE_NUMBER} --json title,body,labels,comments"
+
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
           chmod 600 ~/.ssh/id_agent
 
-          # Canonical tmux-submit pattern (C-u clear, prompt + first Enter,
-          # sleep 1 so Claude Code's multi-line TUI settles, second Enter
-          # that actually submits). This pattern is also shipped as a helper
-          # at groundnuty/macf:scripts/tmux-send-to-claude.sh — keep them in
-          # lock-step. A future release will invoke the helper directly once
-          # agent-config.json gains a workspace_dir field (tracked as
-          # follow-up to groundnuty/macf#57).
-          if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+          # Prefer the canonical helper at $WORKSPACE_DIR/.claude/scripts/tmux-send-to-claude.sh
+          # (shipped by groundnuty/macf:scripts/ and distributed by macf init
+          # / macf update). Falls back to the inline submit pattern for
+          # configs without workspace_dir (pre-v1.2 schema). The fallback
+          # is kept in lock-step with the helper contents — keep the two
+          # in sync. See groundnuty/macf#71.
+          HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
+          if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+            -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+            "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null && test -x '${HELPER}'" 2>/dev/null; then
+            # Helper path: one SSH invocation that runs the canonical script
+            # with the target and prompt as args. Single source of truth.
+            if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+              "'${HELPER}' '${TARGET}' '${PROMPT}'"; then
+              echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via helper (target=${TARGET})"
+            else
+              echo "Agent ${LABEL} helper invocation failed"
+              gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "agent-offline"
+            fi
+          elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
             -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
             "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
               && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
-              && ${TMUX_BIN} send-keys -t ${TARGET} 'Please work on issue #${ISSUE_NUMBER}. Run: gh issue view ${ISSUE_NUMBER} --json title,body,labels,comments' Enter \
+              && ${TMUX_BIN} send-keys -t ${TARGET} '${PROMPT}' Enter \
               && sleep 1 \
               && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
-            echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} (target=${TARGET})"
+            echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via inline (target=${TARGET})"
           else
             echo "Agent ${LABEL} is offline or unreachable"
             gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "agent-offline"
@@ -202,6 +218,7 @@ jobs:
               WINDOW=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_window // empty')
               SSH_USER=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].ssh_user')
               TMUX_BIN=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_bin // "tmux"')
+              WORKSPACE_DIR=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].workspace_dir // empty')
 
               # Same session/window target construction as route-by-label.
               if [ -n "$WINDOW" ]; then
@@ -210,21 +227,34 @@ jobs:
                 TARGET="$SESSION"
               fi
 
+              MENTION_PROMPT="You were mentioned in ${REF}. Please check and respond: gh issue view ${VIEW_NUM} --repo ${REPO} --json title,body,comments"
+
               mkdir -p ~/.ssh && chmod 700 ~/.ssh
               echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
               chmod 600 ~/.ssh/id_agent
 
-              # Canonical tmux-submit pattern — keep in sync with
-              # groundnuty/macf:scripts/tmux-send-to-claude.sh. See the
-              # comment above the label-routing ssh for the full rationale.
-              if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+              # Helper invocation path (see route-by-label for rationale).
+              # Falls back to inline when workspace_dir is unset or the
+              # helper isn't executable at that path.
+              HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
+              if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+                -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+                "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null && test -x '${HELPER}'" 2>/dev/null; then
+                if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+                  -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+                  "'${HELPER}' '${TARGET}' '${MENTION_PROMPT}'"; then
+                  echo "Routed mention to ${AGENT_NAME} via helper (target=${TARGET})"
+                else
+                  echo "Agent ${AGENT_NAME} helper invocation failed"
+                fi
+              elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
                 -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
                 "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
                   && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
-                  && ${TMUX_BIN} send-keys -t ${TARGET} 'You were mentioned in ${REF}. Please check and respond: gh issue view ${VIEW_NUM} --repo ${REPO} --json title,body,comments' Enter \
+                  && ${TMUX_BIN} send-keys -t ${TARGET} '${MENTION_PROMPT}' Enter \
                   && sleep 1 \
                   && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
-                echo "Routed mention to ${AGENT_NAME} (target=${TARGET})"
+                echo "Routed mention to ${AGENT_NAME} via inline (target=${TARGET})"
               else
                 echo "Agent ${AGENT_NAME} is offline, skipping"
               fi
