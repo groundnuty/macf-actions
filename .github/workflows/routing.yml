@@ -1,10 +1,8 @@
 # Self-routing for groundnuty/macf-actions.
 #
-# This repo hosts the reusable agent-router.yml workflow. When someone
-# (an agent or user) comments/labels/opens PRs on THIS repo, we route
-# those events through our own reusable workflow so @mentions reach
-# tmux sessions just like they do on consuming repos. Uses the local
-# agent-router.yml via the relative `./.github/workflows/...` syntax.
+# This repo hosts the reusable agent-router.yml workflow. When events fire
+# on THIS repo (issues/comments/PRs), we route them via our own reusable
+# workflow so @mentions reach agents' tmux sessions — same as consuming repos.
 name: Self Routing
 
 on:
@@ -16,6 +14,15 @@ on:
     types: [opened]
   pull_request_review:
     types: [submitted]
+
+# Caller must grant at least what the reusable workflow expects
+# (see groundnuty/macf-actions/.github/workflows/agent-router.yml's
+# `permissions:` block). Without this, GitHub's strict permission-inheritance
+# rejects the workflow_call with "is only allowed 'issues: none, ...'".
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
 
 jobs:
   route:
