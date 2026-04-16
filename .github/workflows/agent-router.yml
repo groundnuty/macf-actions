@@ -47,7 +47,7 @@ jobs:
     if: >
       (github.event_name == 'issues') &&
       (github.event.action == 'labeled') &&
-      (github.actor \!= 'github-actions[bot]')
+      (github.actor != 'github-actions[bot]')
     runs-on: ubuntu-latest
     env:
       AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
