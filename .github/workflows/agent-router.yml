@@ -112,6 +112,15 @@ jobs:
           # configs without workspace_dir (pre-v1.2 schema). The fallback
           # is kept in lock-step with the helper contents — keep the two
           # in sync. See groundnuty/macf#71.
+          #
+          # Shell-quoting caveat: the helper invocation passes $TARGET and
+          # $PROMPT via single-quoted args inside the remote ssh command.
+          # Current PROMPT contents interpolate only issue numbers and
+          # GitHub-supplied REF strings (all safe — no single quotes).
+          # If PROMPT ever grows to include user-controlled text (issue
+          # body, comment body, etc.), switch to `bash -s` + heredoc-stdin
+          # or escape single quotes before passing — otherwise a prompt
+          # containing `'` would break the remote parse.
           HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
           if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
             -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
