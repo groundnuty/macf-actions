@@ -19,5 +19,5 @@ on:
 
 jobs:
   route:
-    uses: ./.github/workflows/agent-router.yml
+    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@main
     secrets: inherit
