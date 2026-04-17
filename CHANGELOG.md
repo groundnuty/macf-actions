@@ -15,9 +15,19 @@ All notable changes to this project will be documented in this file. The format 
 
 Consumers subscribing to the reusable workflow need to add `check_suite: { types: [completed] }` to their caller workflow's `on:` list to receive CI-completion routing. Without this, existing v1.0 behavior (label + mention routing) continues unchanged — the new job simply never fires.
 
-### Permissions
+### Permissions — ⚠ consumer action required
 
-The reusable workflow now requests `checks: read` to enumerate `check_runs` in a completed suite. Consumers inheriting permissions via `secrets: inherit` get this automatically on the managed runner; no caller-side change needed.
+The reusable workflow now requests `checks: read` to enumerate `check_runs` in a completed suite. GitHub's `workflow_call` rule is that a reusable workflow's `GITHUB_TOKEN` cannot exceed the caller's permissions — so **every consumer that subscribes to `check_suite` must also grant `checks: read` in its caller workflow's `permissions:` block**, or the failing-check lookup will 403. Existing consumers upgrading to `@v1` (floating tag) should update their `routing.yml` to match:
+
+```yaml
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  checks: read    # add for CI-completion routing (v1.1+)
+```
+
+Known consumers to update (as of this release): `groundnuty/macf`, `groundnuty/academic-resume`. Without `checks: read`, existing label/mention routing continues to work; only the CI-completion routing job is affected.
 
 ## [1.0.0] — 2026-04-15
 

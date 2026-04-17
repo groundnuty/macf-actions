@@ -28,6 +28,11 @@ permissions:
   contents: read
   issues: write
   pull-requests: read
+  # `checks: read` is required for route-by-ci-completion (#6) to
+  # enumerate check_runs in a completed suite. Callers of this reusable
+  # workflow who subscribe to `check_suite` MUST grant this or the
+  # failing-check name lookup will 403. See CHANGELOG 1.1.0.
+  checks: read
 
 jobs:
   route:
