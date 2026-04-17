@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0] — 2026-04-17
+## [1.3.0] — 2026-04-17
 
 ### Added
 
@@ -13,7 +13,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Non-breaking caller change
 
-Consumers subscribing to the reusable workflow need to add `check_suite: { types: [completed] }` to their caller workflow's `on:` list to receive CI-completion routing. Without this, existing v1.0 behavior (label + mention routing) continues unchanged — the new job simply never fires.
+Consumers subscribing to the reusable workflow need to add `check_suite: { types: [completed] }` to their caller workflow's `on:` list to receive CI-completion routing. Without this, existing v1.2 behavior (label + mention routing) continues unchanged — the new job simply never fires.
 
 ### Permissions — ⚠ consumer action required
 
@@ -24,7 +24,7 @@ permissions:
   contents: read
   issues: write
   pull-requests: read
-  checks: read    # add for CI-completion routing (v1.1+)
+  checks: read    # add for CI-completion routing (v1.3+)
 ```
 
 Known consumers to update (as of this release): `groundnuty/macf`, `groundnuty/academic-resume`. Without `checks: read`, existing label/mention routing continues to work; only the CI-completion routing job is affected.
