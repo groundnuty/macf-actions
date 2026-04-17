@@ -287,7 +287,11 @@ jobs:
             PR_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha')
             PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
 
-            [ "$PR_HEAD_SHA" != "$CHECK_SUITE_HEAD_SHA" ] && { echo "PR #${PR_NUMBER} HEAD moved; skipping"; continue; }
+            # Staleness guard: a force-push during CI produces a check_suite
+            # on the OLD head_sha. If it completes after new CI started, the
+            # notification would reference outdated status. See #6 body for
+            # the force-push race-condition write-up.
+            [ "$PR_HEAD_SHA" != "$CHECK_SUITE_HEAD_SHA" ] && { echo "PR #${PR_NUMBER} HEAD moved past ${CHECK_SUITE_HEAD_SHA} (now ${PR_HEAD_SHA}); skipping stale check_suite"; continue; }
             [ "$PR_STATE" != "open" ] && { echo "PR #${PR_NUMBER} state=${PR_STATE}; skipping"; continue; }
             [ "$PR_DRAFT" = "true" ] && { echo "PR #${PR_NUMBER} is a draft; skipping"; continue; }
 
