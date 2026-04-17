@@ -36,5 +36,14 @@ permissions:
 
 jobs:
   route:
-    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@main
+    # Pinned to v1.3.0 (SSH+tmux transport) during the v2 rollout.
+    # Bump to @v2.0.0 after:
+    #   1. Setting the ROUTING_CLIENT_CERT + ROUTING_CLIENT_KEY secrets
+    #      (values from `macf certs issue-routing-client` on a workspace
+    #       that has the project CA key)
+    #   2. Setting the PROJECT_CA_CERT repo Variable (public CA PEM)
+    #   3. Adding `port` fields to each agent in agent-config.json
+    #      (port the agent's channel server listens on)
+    # See macf-actions#8 + CHANGELOG v2.0.0 for details.
+    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v1.3.0
     secrets: inherit

@@ -1,30 +1,41 @@
-name: Agent Router (reusable)
+name: Agent Router (reusable, v2 — mTLS transport)
 
-# Callable reusable workflow. Consumers trigger it from their own workflow
-# via `jobs.<id>.uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v1`.
-# Events (issues, issue_comment, pull_request, pull_request_review) are declared
-# in the caller, not here.
+# Reusable workflow for routing GitHub events (issues, comments, PRs,
+# check_suites) to MACF agents. v2 delivers notifications via mTLS
+# HTTPS POST to each agent's /notify endpoint; v1.x used SSH + tmux
+# send-keys. See CHANGELOG and macf-actions#8 for the migration.
+#
+# Caller requirements:
+#   secrets:
+#     ROUTING_CLIENT_CERT — base64 PEM, minted via `macf certs issue-routing-client`
+#     ROUTING_CLIENT_KEY  — base64 PEM, ditto
+#     TS_OAUTH_CLIENT_ID  — Tailscale OAuth client ID (runner reaches agent VM over Tailscale)
+#     TS_OAUTH_SECRET     — Tailscale OAuth secret
+#   vars:
+#     PROJECT_CA_CERT     — public PEM of the project CA (from `macf certs init`)
+#   caller's agent-config.json:
+#     Each agent must have `host` AND `port` fields (port added in v2).
 
 on:
   workflow_call:
     secrets:
-      AGENT_SSH_KEY:
-        description: SSH key for connecting to agent hosts
+      ROUTING_CLIENT_CERT:
+        description: Base64 PEM of the routing-action client certificate
+        required: true
+      ROUTING_CLIENT_KEY:
+        description: Base64 PEM of the routing-action client private key
         required: true
       TS_OAUTH_CLIENT_ID:
-        description: Tailscale OAuth client ID for the GitHub Actions runner
+        description: Tailscale OAuth client ID for the GHA runner
         required: true
       TS_OAUTH_SECRET:
-        description: Tailscale OAuth secret for the GitHub Actions runner
+        description: Tailscale OAuth secret for the GHA runner
         required: true
 
 permissions:
   contents: read
   issues: write
   pull-requests: read
-  # checks: read needed by route-by-ci-completion (#6) to enumerate
-  # check_runs in the completed suite so the notification can name the
-  # first failing check (not just "CI failed").
   checks: read
 
 jobs:
@@ -54,8 +65,10 @@ jobs:
       (github.actor != 'github-actions[bot]')
     runs-on: ubuntu-latest
     env:
-      AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
       AGENTS: ${{ needs.config.outputs.agents }}
+      PROJECT_CA_CERT: ${{ vars.PROJECT_CA_CERT }}
+      ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
+      ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Connect to Tailscale
@@ -68,9 +81,10 @@ jobs:
       - name: Wait for Tailscale network
         run: sleep 10
 
-      - name: Route to agent by label
+      - name: Route to agent by label (mTLS POST)
         env:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
           EVENT_LABEL: ${{ github.event.label.name }}
           ACTOR: ${{ github.event.sender.login }}
         run: |
@@ -89,70 +103,46 @@ jobs:
             exit 0
           fi
 
-          SESSION=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].tmux_session')
-          WINDOW=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].tmux_window // empty')
-          SSH_USER=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].ssh_user')
-          TMUX_BIN=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].tmux_bin // "tmux"')
-          WORKSPACE_DIR=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].workspace_dir // empty')
-
-          # Build the tmux target: "session" or "session:window" if a
-          # tmux_window is configured. Lets multiple peers of one project
-          # share a session with per-agent windows (see groundnuty/macf#69).
-          if [ -n "$WINDOW" ]; then
-            TARGET="${SESSION}:${WINDOW}"
-          else
-            TARGET="$SESSION"
+          PORT=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].port // empty')
+          if [ -z "$PORT" ]; then
+            echo "Agent '$LABEL' missing 'port' field in agent-config.json (required in v2)" >&2
+            exit 1
           fi
 
-          PROMPT="Please work on issue #${ISSUE_NUMBER}. Run: gh issue view ${ISSUE_NUMBER} --json title,body,labels,comments"
+          # NotifyPayload per groundnuty/macf src/types.ts.
+          PAYLOAD=$(jq -n \
+            --arg type "issue_routed" --arg source "label" \
+            --argjson issue_number "$ISSUE_NUMBER" --arg title "$ISSUE_TITLE" \
+            '{type: $type, source: $source, issue_number: $issue_number, title: $title}')
 
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
-          chmod 600 ~/.ssh/id_agent
+          TMPDIR=$(mktemp -d)
+          trap 'rm -rf "$TMPDIR"' EXIT
+          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "PROJECT_CA_CERT var unset" >&2; exit 1; }
+          printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
+          echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
+          echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
+          chmod 600 "$TMPDIR/k.pem"
 
-          # Prefer the canonical helper at $WORKSPACE_DIR/.claude/scripts/tmux-send-to-claude.sh
-          # (shipped by groundnuty/macf:scripts/ and distributed by macf init
-          # / macf update). Falls back to the inline submit pattern for
-          # configs without workspace_dir (pre-v1.2 schema). The fallback
-          # is kept in lock-step with the helper contents — keep the two
-          # in sync. See groundnuty/macf#71.
-          #
-          # Shell-quoting caveat: the helper invocation passes $TARGET and
-          # $PROMPT via single-quoted args inside the remote ssh command.
-          # Current PROMPT contents interpolate only issue numbers and
-          # GitHub-supplied REF strings (all safe — no single quotes).
-          # If PROMPT ever grows to include user-controlled text (issue
-          # body, comment body, etc.), switch to `bash -s` + heredoc-stdin
-          # or escape single quotes before passing — otherwise a prompt
-          # containing `'` would break the remote parse.
-          HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
-          if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-            -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-            "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null && test -x '${HELPER}'" 2>/dev/null; then
-            # Helper path: one SSH invocation that runs the canonical script
-            # with the target and prompt as args. Single source of truth.
-            if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "'${HELPER}' '${TARGET}' '${PROMPT}'"; then
-              echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via helper (target=${TARGET})"
-            else
-              echo "Agent ${LABEL} helper invocation failed"
-              gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "agent-offline"
-            fi
-          elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-            -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-            "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
-              && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
-              && ${TMUX_BIN} send-keys -t ${TARGET} '${PROMPT}' Enter \
-              && sleep 1 \
-              && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
-            echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via inline (target=${TARGET})"
-          else
-            echo "Agent ${LABEL} is offline or unreachable"
-            gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "agent-offline"
-            gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
-              --body "Agent \`${APP_NAME}[bot]\` is offline. Issue will be picked up when the agent starts."
+          set +e
+          HTTP_CODE=$(curl --silent --show-error \
+            --cacert "$TMPDIR/ca.pem" --cert "$TMPDIR/c.pem" --key "$TMPDIR/k.pem" \
+            --max-time 30 -X POST "https://${HOST}:${PORT}/notify" \
+            -H 'Content-Type: application/json' -d "$PAYLOAD" \
+            -o "$TMPDIR/r.txt" -w '%{http_code}')
+          CURL_RC=$?
+          set -e
+
+          if [ "$CURL_RC" -eq 0 ] && [ "$HTTP_CODE" = "200" ]; then
+            echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via mTLS POST (HTTP 200)"
+            exit 0
           fi
+
+          echo "Agent ${LABEL} unreachable via mTLS (curl rc=$CURL_RC, HTTP=$HTTP_CODE); marking agent-offline"
+          if [ -s "$TMPDIR/r.txt" ]; then echo "--- response ---" >&2; cat "$TMPDIR/r.txt" >&2; fi
+          gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "agent-offline"
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "Agent \`${APP_NAME}[bot]\` is offline. Issue will be picked up when the agent starts."
+          exit 1
 
   # ─── @MENTION ROUTING ───
   route-by-mention:
@@ -163,8 +153,10 @@ jobs:
       (github.event_name == 'pull_request_review')
     runs-on: ubuntu-latest
     env:
-      AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
       AGENTS: ${{ needs.config.outputs.agents }}
+      PROJECT_CA_CERT: ${{ vars.PROJECT_CA_CERT }}
+      ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
+      ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
     steps:
       - name: Connect to Tailscale
         uses: tailscale/github-action@v3
@@ -176,7 +168,7 @@ jobs:
       - name: Wait for Tailscale network
         run: sleep 10
 
-      - name: Route to mentioned agents
+      - name: Route to mentioned agents (mTLS POST)
         env:
           EVENT_NAME: ${{ github.event_name }}
           COMMENT_BODY: ${{ github.event.comment.body }}
@@ -191,100 +183,56 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "$EVENT_NAME" = "issue_comment" ]; then
-            BODY="$COMMENT_BODY"
-            ACTOR="$COMMENT_USER"
-            REF="issue #${ISSUE_NUMBER}"
-            VIEW_NUM="$ISSUE_NUMBER"
-          elif [ "$EVENT_NAME" = "pull_request" ]; then
-            BODY="$PR_BODY"
-            ACTOR="$PR_USER"
-            REF="PR #${PR_NUMBER}"
-            VIEW_NUM="$PR_NUMBER"
-          elif [ "$EVENT_NAME" = "pull_request_review" ]; then
-            BODY="$REVIEW_BODY"
-            ACTOR="$REVIEW_USER"
-            REF="PR #${PR_NUMBER}"
-            VIEW_NUM="$PR_NUMBER"
-          else
-            BODY="$COMMENT_BODY"
-            ACTOR="$COMMENT_USER"
-            REF="PR #${PR_NUMBER}"
-            VIEW_NUM="$PR_NUMBER"
-          fi
+          case "$EVENT_NAME" in
+            issue_comment) BODY="$COMMENT_BODY"; ACTOR="$COMMENT_USER"; REF="issue #${ISSUE_NUMBER}"; VIEW_NUM="$ISSUE_NUMBER" ;;
+            pull_request) BODY="$PR_BODY"; ACTOR="$PR_USER"; REF="PR #${PR_NUMBER}"; VIEW_NUM="$PR_NUMBER" ;;
+            pull_request_review) BODY="$REVIEW_BODY"; ACTOR="$REVIEW_USER"; REF="PR #${PR_NUMBER}"; VIEW_NUM="$PR_NUMBER" ;;
+            *) BODY="$COMMENT_BODY"; ACTOR="$COMMENT_USER"; REF="PR #${PR_NUMBER}"; VIEW_NUM="$PR_NUMBER" ;;
+          esac
 
-          if [ "$ACTOR" = "github-actions[bot]" ]; then
-            echo "Comment from github-actions[bot], skipping"
-            exit 0
-          fi
+          [ "$ACTOR" = "github-actions[bot]" ] && { echo "skip github-actions[bot]"; exit 0; }
+
+          TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
+          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "PROJECT_CA_CERT unset" >&2; exit 1; }
+          printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
+          echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
+          echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
+          chmod 600 "$TMPDIR/k.pem"
 
           for AGENT_NAME in $(echo "$AGENTS" | jq -r 'keys[]'); do
             APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].app_name // empty')
-
-            if [ "$ACTOR" = "${APP_NAME}[bot]" ]; then
-              continue
-            fi
+            [ "$ACTOR" = "${APP_NAME}[bot]" ] && continue
 
             if echo "$BODY" | grep -qE "@(${AGENT_NAME}|${APP_NAME})\[bot\]"; then
-              HOST=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].host')
-              SESSION=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_session')
-              WINDOW=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_window // empty')
-              SSH_USER=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].ssh_user')
-              TMUX_BIN=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_bin // "tmux"')
-              WORKSPACE_DIR=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].workspace_dir // empty')
-
-              # Same session/window target construction as route-by-label.
-              if [ -n "$WINDOW" ]; then
-                TARGET="${SESSION}:${WINDOW}"
-              else
-                TARGET="$SESSION"
+              HOST=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].host // empty')
+              PORT=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].port // empty')
+              if [ -z "$HOST" ] || [ -z "$PORT" ]; then
+                echo "Agent ${AGENT_NAME} missing host/port; skipping" >&2
+                continue
               fi
 
-              MENTION_PROMPT="You were mentioned in ${REF}. Please check and respond: gh issue view ${VIEW_NUM} --repo ${REPO} --json title,body,comments"
+              MESSAGE="You were mentioned in ${REF}. Please check and respond: gh issue view ${VIEW_NUM} --repo ${REPO} --json title,body,comments"
+              PAYLOAD=$(jq -n --arg type "mention" --arg source "mention" --argjson issue_number "$VIEW_NUM" --arg message "$MESSAGE" \
+                '{type: $type, source: $source, issue_number: $issue_number, message: $message}')
 
-              mkdir -p ~/.ssh && chmod 700 ~/.ssh
-              echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
-              chmod 600 ~/.ssh/id_agent
+              set +e
+              HTTP_CODE=$(curl --silent --show-error \
+                --cacert "$TMPDIR/ca.pem" --cert "$TMPDIR/c.pem" --key "$TMPDIR/k.pem" \
+                --max-time 30 -X POST "https://${HOST}:${PORT}/notify" \
+                -H 'Content-Type: application/json' -d "$PAYLOAD" \
+                -o "$TMPDIR/r.txt" -w '%{http_code}')
+              CURL_RC=$?
+              set -e
 
-              # Helper invocation path (see route-by-label for rationale).
-              # Falls back to inline when workspace_dir is unset or the
-              # helper isn't executable at that path.
-              HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
-              if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-                -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null && test -x '${HELPER}'" 2>/dev/null; then
-                if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-                  -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                  "'${HELPER}' '${TARGET}' '${MENTION_PROMPT}'"; then
-                  echo "Routed mention to ${AGENT_NAME} via helper (target=${TARGET})"
-                else
-                  echo "Agent ${AGENT_NAME} helper invocation failed"
-                fi
-              elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-                -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
-                  && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
-                  && ${TMUX_BIN} send-keys -t ${TARGET} '${MENTION_PROMPT}' Enter \
-                  && sleep 1 \
-                  && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
-                echo "Routed mention to ${AGENT_NAME} via inline (target=${TARGET})"
+              if [ "$CURL_RC" -eq 0 ] && [ "$HTTP_CODE" = "200" ]; then
+                echo "Routed mention to ${AGENT_NAME} via mTLS POST"
               else
-                echo "Agent ${AGENT_NAME} is offline, skipping"
+                echo "Agent ${AGENT_NAME} unreachable via mTLS (rc=$CURL_RC HTTP=$HTTP_CODE); skipping (mention events don't mark agent-offline)"
               fi
             fi
           done
 
   # ─── CI COMPLETION ROUTING ───
-  #
-  # When a check_suite completes on a PR authored by one of our registered
-  # agents, notify the agent in its tmux session so it can merge (on
-  # success) or investigate (on failure) without polling. See #6.
-  #
-  # Fires once per check_suite.completed event. A repo with multiple CI
-  # workflows may produce multiple completed suites per commit (one per
-  # app). We accept this minor duplication rather than try to aggregate —
-  # the alternative is a timer-based cross-suite coalescer which is
-  # substantially more complex and adds latency.
   route-by-ci-completion:
     needs: config
     if: >
@@ -292,8 +240,10 @@ jobs:
       (github.event.action == 'completed')
     runs-on: ubuntu-latest
     env:
-      AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
       AGENTS: ${{ needs.config.outputs.agents }}
+      PROJECT_CA_CERT: ${{ vars.PROJECT_CA_CERT }}
+      ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
+      ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CHECK_SUITE_ID: ${{ github.event.check_suite.id }}
       CHECK_SUITE_HEAD_SHA: ${{ github.event.check_suite.head_sha }}
@@ -310,36 +260,24 @@ jobs:
       - name: Wait for Tailscale network
         run: sleep 10
 
-      - name: Route CI completion to agent-authored PRs
+      - name: Route CI completion to agent-authored PRs (mTLS POST)
         run: |
           set -euo pipefail
 
-          # Only act on terminal conclusions. Skip neutral/cancelled/
-          # skipped — rarely need agent action and would add noise.
           case "$CHECK_SUITE_CONCLUSION" in
-            success|failure|timed_out|action_required)
-              ;;
-            *)
-              echo "Conclusion '$CHECK_SUITE_CONCLUSION' is not actionable, skipping"
-              exit 0
-              ;;
+            success|failure|timed_out|action_required) ;;
+            *) echo "Conclusion '$CHECK_SUITE_CONCLUSION' not actionable; skipping"; exit 0 ;;
           esac
 
-          # Enumerate PRs associated with this check_suite. The
-          # check_suite event payload has `pull_requests[]` with basic
-          # info but not `draft` / `state`, so we query the PR directly.
-          PR_NUMBERS=$(gh api \
-            "/repos/${REPO}/commits/${CHECK_SUITE_HEAD_SHA}/pulls" \
-            --jq '.[] | .number')
+          PR_NUMBERS=$(gh api "/repos/${REPO}/commits/${CHECK_SUITE_HEAD_SHA}/pulls" --jq '.[] | .number')
+          [ -z "$PR_NUMBERS" ] && { echo "No PR for SHA ${CHECK_SUITE_HEAD_SHA}; skipping"; exit 0; }
 
-          if [ -z "$PR_NUMBERS" ]; then
-            echo "No PR associated with SHA ${CHECK_SUITE_HEAD_SHA}, skipping"
-            exit 0
-          fi
-
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
-          chmod 600 ~/.ssh/id_agent
+          TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
+          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "PROJECT_CA_CERT unset" >&2; exit 1; }
+          printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
+          echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
+          echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
+          chmod 600 "$TMPDIR/k.pem"
 
           for PR_NUMBER in $PR_NUMBERS; do
             PR_JSON=$(gh api "/repos/${REPO}/pulls/${PR_NUMBER}")
@@ -349,100 +287,58 @@ jobs:
             PR_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha')
             PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
 
-            # Staleness guard: a force-push during CI produces a
-            # workflow_run/check_suite on the OLD head_sha. If that
-            # completes after a new one starts, the notification would
-            # be misleading — skip it.
-            if [ "$PR_HEAD_SHA" != "$CHECK_SUITE_HEAD_SHA" ]; then
-              echo "PR #${PR_NUMBER} HEAD moved past ${CHECK_SUITE_HEAD_SHA} (now ${PR_HEAD_SHA}), skipping"
-              continue
-            fi
+            [ "$PR_HEAD_SHA" != "$CHECK_SUITE_HEAD_SHA" ] && { echo "PR #${PR_NUMBER} HEAD moved; skipping"; continue; }
+            [ "$PR_STATE" != "open" ] && { echo "PR #${PR_NUMBER} state=${PR_STATE}; skipping"; continue; }
+            [ "$PR_DRAFT" = "true" ] && { echo "PR #${PR_NUMBER} is a draft; skipping"; continue; }
 
-            if [ "$PR_STATE" != "open" ]; then
-              echo "PR #${PR_NUMBER} state=${PR_STATE}, skipping"
-              continue
-            fi
-
-            if [ "$PR_DRAFT" = "true" ]; then
-              echo "PR #${PR_NUMBER} is a draft, skipping"
-              continue
-            fi
-
-            # Author-to-agent lookup: PR's author.login must match one
-            # of the configured agent app_names (suffix `[bot]`).
             AGENT_NAME=""
             for CANDIDATE in $(echo "$AGENTS" | jq -r 'keys[]'); do
               APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$CANDIDATE" '.[$a].app_name // empty')
-              if [ "$PR_AUTHOR" = "${APP_NAME}[bot]" ]; then
-                AGENT_NAME="$CANDIDATE"
-                break
-              fi
+              [ "$PR_AUTHOR" = "${APP_NAME}[bot]" ] && { AGENT_NAME="$CANDIDATE"; break; }
             done
+            [ -z "$AGENT_NAME" ] && { echo "PR #${PR_NUMBER} author '${PR_AUTHOR}' not a registered agent; skipping"; continue; }
 
-            if [ -z "$AGENT_NAME" ]; then
-              echo "PR #${PR_NUMBER} author '${PR_AUTHOR}' is not a registered agent, skipping"
+            HOST=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].host // empty')
+            PORT=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].port // empty')
+            if [ -z "$HOST" ] || [ -z "$PORT" ]; then
+              echo "Agent ${AGENT_NAME} missing host/port in agent-config.json; skipping" >&2
               continue
             fi
 
-            # Build the notification prompt.
             PR_URL="https://github.com/${REPO}/pull/${PR_NUMBER}"
             if [ "$CHECK_SUITE_CONCLUSION" = "success" ]; then
-              PROMPT="PR #${PR_NUMBER} (\"${PR_TITLE}\"): CI SUCCESS. ${PR_URL}. Next: merge if you're the author."
+              MESSAGE="PR #${PR_NUMBER} (\"${PR_TITLE}\"): CI SUCCESS. ${PR_URL}. Next: merge if you're the author."
             else
-              # On failure, name the first failing check for faster
-              # triage. `gh api` returns check_runs for this suite;
-              # filter to failed ones.
-              FAILING=$(gh api \
-                "/repos/${REPO}/check-suites/${CHECK_SUITE_ID}/check-runs" \
-                --jq '.check_runs[] | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="action_required") | .name' \
-                | head -1)
+              FAILING=$(gh api "/repos/${REPO}/check-suites/${CHECK_SUITE_ID}/check-runs" \
+                --jq '.check_runs[] | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="action_required") | .name' | head -1)
               if [ -n "$FAILING" ]; then
-                PROMPT="PR #${PR_NUMBER} (\"${PR_TITLE}\"): CI FAILED. First failing check: '${FAILING}'. ${PR_URL}. Next: investigate + push fix."
+                MESSAGE="PR #${PR_NUMBER} (\"${PR_TITLE}\"): CI FAILED. First failing check: '${FAILING}'. ${PR_URL}. Next: investigate + push fix."
               else
-                PROMPT="PR #${PR_NUMBER} (\"${PR_TITLE}\"): CI FAILED (${CHECK_SUITE_CONCLUSION}). ${PR_URL}. Next: investigate + push fix."
+                MESSAGE="PR #${PR_NUMBER} (\"${PR_TITLE}\"): CI FAILED (${CHECK_SUITE_CONCLUSION}). ${PR_URL}. Next: investigate + push fix."
               fi
             fi
 
-            HOST=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].host')
-            SESSION=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_session')
-            WINDOW=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_window // empty')
-            SSH_USER=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].ssh_user')
-            TMUX_BIN=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_bin // "tmux"')
-            WORKSPACE_DIR=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].workspace_dir // empty')
+            # CI-completion uses 'mention' NotifyPayload type for v2.0.0 — the
+            # schema (groundnuty/macf src/types.ts NotifyPayloadSchema) doesn't
+            # yet have a dedicated ci_completion variant; distinguished by
+            # source='ci_completion'. Follow-up to add a proper variant.
+            PAYLOAD=$(jq -n --arg type "mention" --arg source "ci_completion" \
+              --argjson issue_number "$PR_NUMBER" --arg message "$MESSAGE" \
+              '{type: $type, source: $source, issue_number: $issue_number, message: $message}')
 
-            if [ -n "$WINDOW" ]; then
-              TARGET="${SESSION}:${WINDOW}"
+            set +e
+            HTTP_CODE=$(curl --silent --show-error \
+              --cacert "$TMPDIR/ca.pem" --cert "$TMPDIR/c.pem" --key "$TMPDIR/k.pem" \
+              --max-time 30 -X POST "https://${HOST}:${PORT}/notify" \
+              -H 'Content-Type: application/json' -d "$PAYLOAD" \
+              -o "$TMPDIR/r.txt" -w '%{http_code}')
+            CURL_RC=$?
+            set -e
+
+            if [ "$CURL_RC" -eq 0 ] && [ "$HTTP_CODE" = "200" ]; then
+              echo "Routed CI completion for PR #${PR_NUMBER} to ${AGENT_NAME} via mTLS"
             else
-              TARGET="$SESSION"
-            fi
-
-            # Shell-quoting caveat: PR_TITLE is user-controlled (the
-            # PR-authoring bot chose it). The helper path uses single-
-            # quoted args; a title containing `'` would break remote
-            # parse. Strip single quotes defensively before passing.
-            SAFE_PROMPT=$(echo "$PROMPT" | tr -d "'")
-
-            HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
-            if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null && test -x '${HELPER}'" 2>/dev/null; then
-              if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-                -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                "'${HELPER}' '${TARGET}' '${SAFE_PROMPT}'"; then
-                echo "Routed CI completion for PR #${PR_NUMBER} to ${AGENT_NAME} via helper (target=${TARGET})"
-              else
-                echo "Agent ${AGENT_NAME} helper invocation failed for PR #${PR_NUMBER}"
-              fi
-            elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
-                && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
-                && ${TMUX_BIN} send-keys -t ${TARGET} '${SAFE_PROMPT}' Enter \
-                && sleep 1 \
-                && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
-              echo "Routed CI completion for PR #${PR_NUMBER} to ${AGENT_NAME} via inline (target=${TARGET})"
-            else
-              echo "Agent ${AGENT_NAME} is offline, skipping CI-completion notification for PR #${PR_NUMBER}"
+              echo "Agent ${AGENT_NAME} unreachable via mTLS for PR #${PR_NUMBER} (rc=$CURL_RC HTTP=$HTTP_CODE); not marking agent-offline on CI-completion path"
             fi
           done
 

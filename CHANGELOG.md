@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-04-17
+
+### Changed — ⚠ breaking
+
+Transport swapped from SSH + `tmux send-keys` to mTLS HTTPS POST to each agent's `/notify` endpoint. Matches the original MACF P6 design (DR-004 mTLS architecture). See [`groundnuty/macf-actions#8`](https://github.com/groundnuty/macf-actions/issues/8) for the design discussion.
+
+### Migration for consumers upgrading `@v1` → `@v2`
+
+1. **Mint a routing-client cert** on a workspace that has the project CA key locally:
+   ```bash
+   macf certs issue-routing-client
+   ```
+   (Requires `macf` CLI `v0.1.1+` — the `issue-routing-client` subcommand was added in `groundnuty/macf#119` / PR #120.)
+
+2. **Add these secrets** to each consumer repo's Settings → Secrets and variables → Actions:
+   - `ROUTING_CLIENT_CERT` — base64 PEM from step 1
+   - `ROUTING_CLIENT_KEY` — base64 PEM from step 1
+
+3. **Add this repo Variable** (public-readable PEM, NOT a secret):
+   - `PROJECT_CA_CERT` — contents of `<PROJECT>_CA_CERT` from your project's registry (or directly from the CA cert on disk, whichever is easier)
+
+4. **Update `.github/agent-config.json`** — add `port` field to each agent entry. Look up each agent's port from `.macf/macf-agent.state.json` (the agent's self-registration) or from the registry variable `<PROJECT>_<AGENT>_ENDPOINT`.
+
+5. **Update the `uses:` ref** in your caller workflow: `@v1` → `@v2`.
+
+6. **Remove the `AGENT_SSH_KEY` secret** once you've verified v2 routing works.
+
+### Failure semantics
+
+- **Label routing on unreachable agent:** still applies the `agent-offline` label + issue comment (UX preserved from v1).
+- **Mention / CI-completion on unreachable agent:** log-only (no label/comment). One missed comment shouldn't trip the offline flag.
+- **No SSH fallback.** v2 is hard-fail by design (macf-actions#8 Option A) — the whole point of migrating is to retire the SSH path cleanly.
+
+### Known limitation
+
+- `NotifyPayload.type='mention'` is used for CI-completion notifications in v2.0.0 because `groundnuty/macf`'s `NotifyPayloadSchema` doesn't yet have a dedicated `ci_completion` variant. Distinguished by `source='ci_completion'`. Follow-up: add the proper schema variant in `groundnuty/macf` and re-cut v2.0.1.
+
+### Not removed (yet)
+
+- `tailscale/github-action` Tailscale bootstrap. Still required — the GHA runner reaches agent VMs over Tailscale in both v1 and v2.
+
 ## [1.3.0] — 2026-04-17
 
 ### Added

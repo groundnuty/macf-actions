@@ -8,6 +8,8 @@ A centrally-maintained, versioned reusable workflow for routing GitHub events (i
 
 ## Usage
 
+### v2 (current major, mTLS transport)
+
 In your MACF-enabled repo, create `.github/workflows/agent-router.yml`:
 
 ```yaml
@@ -17,59 +19,86 @@ on:
   issue_comment: { types: [created] }
   pull_request: { types: [opened] }
   pull_request_review: { types: [submitted] }
-  check_suite: { types: [completed] }   # CI-completion routing (v1.3+)
+  check_suite: { types: [completed] }
 permissions:
   contents: read
   issues: write
   pull-requests: read
-  checks: read                          # required by CI-completion routing
+  checks: read
 jobs:
   route:
-    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v1
+    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v2
     secrets: inherit
 ```
 
-**Upgrading to v1.3 (or via the floating `@v1` tag once it moves past v1.3.0):** if your caller workflow already defines a `permissions:` block, add `checks: read`. Without it the CI-completion routing job will 403 when it tries to enumerate `check_runs` to name the first failing check. GitHub's `workflow_call` rule is that the reusable workflow's token can't exceed the caller's scope, so this permission must be granted at the caller level.
+### v1.x (SSH+tmux transport, maintained for backward-compat)
 
-That's it. GitHub downloads the workflow definition at run time and passes your secrets and events to it.
+v1.x is still available via `@v1` / `@v1.3.0` tags for consumers that haven't migrated to mTLS yet. v1.3.0 added `check_suite` / CI-completion routing; v2.0.0 is a breaking change (different transport, different secrets). See [CHANGELOG.md](./CHANGELOG.md) for the migration.
 
-### Required secrets
+### Required secrets (v2)
 
 Configure these in your repo's **Settings → Secrets and variables → Actions**:
 
+**Secrets (→ `Secrets` tab):**
+
 | Secret | Purpose |
 |---|---|
-| `AGENT_SSH_KEY` | SSH private key for connecting to agent hosts |
+| `ROUTING_CLIENT_CERT` | Base64 PEM of the routing-action client certificate. Mint via `macf certs issue-routing-client`. |
+| `ROUTING_CLIENT_KEY` | Base64 PEM of the routing-action client private key. Same output as above. **Keep strictly secret.** |
 | `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client ID for the runner |
 | `TS_OAUTH_SECRET` | Tailscale OAuth secret for the runner |
 
+**Variables (→ `Variables` tab, not `Secrets` — these are PUBLIC-readable PEM, not private):**
+
+| Variable | Purpose |
+|---|---|
+| `PROJECT_CA_CERT` | Project CA certificate (PEM, from `macf certs init`). Used to verify each agent's server cert during the mTLS handshake. |
+
 The standard `GITHUB_TOKEN` is provided automatically by Actions.
+
+### Required secrets (v1.x, legacy)
+
+Consumers still on `@v1` / `@v1.3.0` use the old secret set:
+
+| Secret | Purpose |
+|---|---|
+| `AGENT_SSH_KEY` | SSH private key for connecting to agent hosts (legacy SSH+tmux transport) |
+| `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client ID for the runner |
+| `TS_OAUTH_SECRET` | Tailscale OAuth secret for the runner |
+
+After migrating to `@v2`, remove `AGENT_SSH_KEY` from your repo secrets (unused, reduces blast radius if it leaks).
 
 ### Required config file
 
 Your repo must have `.github/agent-config.json` describing the agents:
+
+**v2 format (mTLS transport):**
 
 ```json
 {
   "agents": {
     "code-agent": {
       "host": "100.86.5.117",
-      "app_name": "macf-code-agent",
-      "tmux_session": "code-agent",
-      "ssh_user": "ubuntu",
-      "tmux_bin": "tmux"
+      "port": 8800,
+      "app_name": "macf-code-agent"
     },
     "science-agent": {
       "host": "100.86.5.117",
-      "app_name": "macf-science-agent",
-      "tmux_session": "science-agent",
-      "ssh_user": "ubuntu"
+      "port": 8801,
+      "app_name": "macf-science-agent"
     }
   }
 }
 ```
 
-Keys are GitHub labels (e.g., `code-agent` label triggers routing to the agent with key `code-agent`). Use `app_name` to match against `@<app_name>[bot]` mentions.
+v2 fields:
+- **`host`** (required) — Tailscale IP or hostname the GHA runner reaches the agent's channel server at
+- **`port`** (required, new in v2) — port the agent's channel server listens on (from the agent's `.macf/macf-agent.state.json` or registry)
+- **`app_name`** (required) — GitHub App name (matched against `@<app_name>[bot]` mentions and PR authors)
+
+v1.x fields (`tmux_session`, `tmux_bin`, `ssh_user`, `ssh_key_secret`, `tmux_window`, `workspace_dir`) are ignored by v2.
+
+Keys are GitHub labels (e.g., `code-agent` label triggers routing to the agent with key `code-agent`).
 
 ## Versioning
 
@@ -98,6 +127,14 @@ uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v2
 Check [CHANGELOG.md](./CHANGELOG.md) for breaking changes between majors.
 
 ## Behavior
+
+## v2 — mTLS transport (current major)
+
+v2 delivers notifications via mTLS HTTPS POST to each agent's `/notify` endpoint. v1.x used SSH + `tmux send-keys` into the agent's VM. The migration is breaking (new secrets, new agent-config.json field), but simplifies downstream operations: no per-agent SSH key distribution, no tmux-session assumptions, aligns with MACF's designed endgame (DR-004 mTLS architecture).
+
+**Hard-fail on unreachable:** if the POST to an agent's `/notify` fails (timeout, cert mismatch, connection refused), the job fails. The existing `agent-offline` label + issue comment UX is preserved for label-routed events. Mention and CI-completion events don't mark agents offline (too noisy — one missed comment shouldn't trip the offline flag).
+
+### Jobs
 
 The workflow provides four jobs:
 
