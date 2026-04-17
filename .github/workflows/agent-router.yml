@@ -22,6 +22,10 @@ permissions:
   contents: read
   issues: write
   pull-requests: read
+  # checks: read needed by route-by-ci-completion (#6) to enumerate
+  # check_runs in the completed suite so the notification can name the
+  # first failing check (not just "CI failed").
+  checks: read
 
 jobs:
 
@@ -267,6 +271,178 @@ jobs:
               else
                 echo "Agent ${AGENT_NAME} is offline, skipping"
               fi
+            fi
+          done
+
+  # ─── CI COMPLETION ROUTING ───
+  #
+  # When a check_suite completes on a PR authored by one of our registered
+  # agents, notify the agent in its tmux session so it can merge (on
+  # success) or investigate (on failure) without polling. See #6.
+  #
+  # Fires once per check_suite.completed event. A repo with multiple CI
+  # workflows may produce multiple completed suites per commit (one per
+  # app). We accept this minor duplication rather than try to aggregate —
+  # the alternative is a timer-based cross-suite coalescer which is
+  # substantially more complex and adds latency.
+  route-by-ci-completion:
+    needs: config
+    if: >
+      (github.event_name == 'check_suite') &&
+      (github.event.action == 'completed')
+    runs-on: ubuntu-latest
+    env:
+      AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
+      AGENTS: ${{ needs.config.outputs.agents }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CHECK_SUITE_ID: ${{ github.event.check_suite.id }}
+      CHECK_SUITE_HEAD_SHA: ${{ github.event.check_suite.head_sha }}
+      CHECK_SUITE_CONCLUSION: ${{ github.event.check_suite.conclusion }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-runner
+
+      - name: Wait for Tailscale network
+        run: sleep 10
+
+      - name: Route CI completion to agent-authored PRs
+        run: |
+          set -euo pipefail
+
+          # Only act on terminal conclusions. Skip neutral/cancelled/
+          # skipped — rarely need agent action and would add noise.
+          case "$CHECK_SUITE_CONCLUSION" in
+            success|failure|timed_out|action_required)
+              ;;
+            *)
+              echo "Conclusion '$CHECK_SUITE_CONCLUSION' is not actionable, skipping"
+              exit 0
+              ;;
+          esac
+
+          # Enumerate PRs associated with this check_suite. The
+          # check_suite event payload has `pull_requests[]` with basic
+          # info but not `draft` / `state`, so we query the PR directly.
+          PR_NUMBERS=$(gh api \
+            "/repos/${REPO}/commits/${CHECK_SUITE_HEAD_SHA}/pulls" \
+            --jq '.[] | .number')
+
+          if [ -z "$PR_NUMBERS" ]; then
+            echo "No PR associated with SHA ${CHECK_SUITE_HEAD_SHA}, skipping"
+            exit 0
+          fi
+
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
+          chmod 600 ~/.ssh/id_agent
+
+          for PR_NUMBER in $PR_NUMBERS; do
+            PR_JSON=$(gh api "/repos/${REPO}/pulls/${PR_NUMBER}")
+            PR_STATE=$(echo "$PR_JSON" | jq -r '.state')
+            PR_DRAFT=$(echo "$PR_JSON" | jq -r '.draft')
+            PR_AUTHOR=$(echo "$PR_JSON" | jq -r '.user.login')
+            PR_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha')
+            PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
+
+            # Staleness guard: a force-push during CI produces a
+            # workflow_run/check_suite on the OLD head_sha. If that
+            # completes after a new one starts, the notification would
+            # be misleading — skip it.
+            if [ "$PR_HEAD_SHA" != "$CHECK_SUITE_HEAD_SHA" ]; then
+              echo "PR #${PR_NUMBER} HEAD moved past ${CHECK_SUITE_HEAD_SHA} (now ${PR_HEAD_SHA}), skipping"
+              continue
+            fi
+
+            if [ "$PR_STATE" != "open" ]; then
+              echo "PR #${PR_NUMBER} state=${PR_STATE}, skipping"
+              continue
+            fi
+
+            if [ "$PR_DRAFT" = "true" ]; then
+              echo "PR #${PR_NUMBER} is a draft, skipping"
+              continue
+            fi
+
+            # Author-to-agent lookup: PR's author.login must match one
+            # of the configured agent app_names (suffix `[bot]`).
+            AGENT_NAME=""
+            for CANDIDATE in $(echo "$AGENTS" | jq -r 'keys[]'); do
+              APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$CANDIDATE" '.[$a].app_name // empty')
+              if [ "$PR_AUTHOR" = "${APP_NAME}[bot]" ]; then
+                AGENT_NAME="$CANDIDATE"
+                break
+              fi
+            done
+
+            if [ -z "$AGENT_NAME" ]; then
+              echo "PR #${PR_NUMBER} author '${PR_AUTHOR}' is not a registered agent, skipping"
+              continue
+            fi
+
+            # Build the notification prompt.
+            PR_URL="https://github.com/${REPO}/pull/${PR_NUMBER}"
+            if [ "$CHECK_SUITE_CONCLUSION" = "success" ]; then
+              PROMPT="PR #${PR_NUMBER} (\"${PR_TITLE}\"): CI SUCCESS. ${PR_URL}. Next: merge if you're the author."
+            else
+              # On failure, name the first failing check for faster
+              # triage. `gh api` returns check_runs for this suite;
+              # filter to failed ones.
+              FAILING=$(gh api \
+                "/repos/${REPO}/check-suites/${CHECK_SUITE_ID}/check-runs" \
+                --jq '.check_runs[] | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="action_required") | .name' \
+                | head -1)
+              if [ -n "$FAILING" ]; then
+                PROMPT="PR #${PR_NUMBER} (\"${PR_TITLE}\"): CI FAILED. First failing check: '${FAILING}'. ${PR_URL}. Next: investigate + push fix."
+              else
+                PROMPT="PR #${PR_NUMBER} (\"${PR_TITLE}\"): CI FAILED (${CHECK_SUITE_CONCLUSION}). ${PR_URL}. Next: investigate + push fix."
+              fi
+            fi
+
+            HOST=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].host')
+            SESSION=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_session')
+            WINDOW=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_window // empty')
+            SSH_USER=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].ssh_user')
+            TMUX_BIN=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_bin // "tmux"')
+            WORKSPACE_DIR=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].workspace_dir // empty')
+
+            if [ -n "$WINDOW" ]; then
+              TARGET="${SESSION}:${WINDOW}"
+            else
+              TARGET="$SESSION"
+            fi
+
+            # Shell-quoting caveat: PR_TITLE is user-controlled (the
+            # PR-authoring bot chose it). The helper path uses single-
+            # quoted args; a title containing `'` would break remote
+            # parse. Strip single quotes defensively before passing.
+            SAFE_PROMPT=$(echo "$PROMPT" | tr -d "'")
+
+            HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
+            if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+              "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null && test -x '${HELPER}'" 2>/dev/null; then
+              if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+                -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+                "'${HELPER}' '${TARGET}' '${SAFE_PROMPT}'"; then
+                echo "Routed CI completion for PR #${PR_NUMBER} to ${AGENT_NAME} via helper (target=${TARGET})"
+              else
+                echo "Agent ${AGENT_NAME} helper invocation failed for PR #${PR_NUMBER}"
+              fi
+            elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+              "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
+                && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
+                && ${TMUX_BIN} send-keys -t ${TARGET} '${SAFE_PROMPT}' Enter \
+                && sleep 1 \
+                && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
+              echo "Routed CI completion for PR #${PR_NUMBER} to ${AGENT_NAME} via inline (target=${TARGET})"
+            else
+              echo "Agent ${AGENT_NAME} is offline, skipping CI-completion notification for PR #${PR_NUMBER}"
             fi
           done
 

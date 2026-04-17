@@ -17,6 +17,7 @@ on:
   issue_comment: { types: [created] }
   pull_request: { types: [opened] }
   pull_request_review: { types: [submitted] }
+  check_suite: { types: [completed] }   # CI-completion routing (v1.1+)
 jobs:
   route:
     uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v1
@@ -91,11 +92,16 @@ Check [CHANGELOG.md](./CHANGELOG.md) for breaking changes between majors.
 
 ## Behavior
 
-The workflow provides three jobs:
+The workflow provides four jobs:
 
 1. **`route-by-label`** — when an issue is labeled with an agent name, route it to that agent via SSH + tmux send-keys
 2. **`route-by-mention`** — when an agent is `@mentioned` in a comment, PR body, or review, route the mention to the agent
-3. **`cleanup-labels`** — when an issue closes, remove status labels (`in-progress`, `in-review`, `blocked`)
+3. **`route-by-ci-completion`** (v1.1+) — when CI finishes on an agent-authored PR, notify the authoring agent in its tmux session so it can merge on success or push a fix on failure without polling. Filters:
+    - Only fires for PRs authored by agents configured in `agent-config.json` (skips human / dependabot / external authors)
+    - Skips draft PRs
+    - Skips stale CI (when the PR HEAD moved past the SHA the suite ran on, e.g. after a force-push)
+    - Only terminal conclusions (`success`, `failure`, `timed_out`, `action_required`); skips `neutral`, `cancelled`, `skipped`
+4. **`cleanup-labels`** — when an issue closes, remove status labels (`in-progress`, `in-review`, `blocked`)
 
 If an agent is unreachable, the workflow adds the `agent-offline` label so the agent can pick up missed work on startup.
 
