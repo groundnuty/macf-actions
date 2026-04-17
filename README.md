@@ -54,6 +54,8 @@ Configure these in your repo's **Settings → Secrets and variables → Actions*
 |---|---|
 | `PROJECT_CA_CERT` | Project CA certificate (PEM, from `macf certs init`). Used to verify each agent's server cert during the mTLS handshake. |
 
+> **Paste the CA PEM with literal newlines preserved.** Some web forms strip or escape whitespace; the CA cert value in the GHA Variables UI must contain actual `\n` line breaks between `-----BEGIN CERTIFICATE-----` and `-----END CERTIFICATE-----`. If you paste from the output of `cat <your-project>/<project-id>/ca-cert.pem` directly, you're fine. If you paste from a system that replaces newlines with literal `\n` characters or joins into a single line, the TLS handshake will fail with a "malformed PEM" or similar error at workflow runtime.
+
 The standard `GITHUB_TOKEN` is provided automatically by Actions.
 
 ### Required secrets (v1.x, legacy)
