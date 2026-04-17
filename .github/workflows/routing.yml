@@ -14,6 +14,11 @@ on:
     types: [opened]
   pull_request_review:
     types: [submitted]
+  # CI-completion routing (#6). Fires the route-by-ci-completion job
+  # in the reusable workflow to notify agent-authored PRs when CI
+  # finishes, eliminating the wait-for-human-ping polling pattern.
+  check_suite:
+    types: [completed]
 
 # Caller must grant at least what the reusable workflow expects
 # (see groundnuty/macf-actions/.github/workflows/agent-router.yml's
@@ -23,6 +28,11 @@ permissions:
   contents: read
   issues: write
   pull-requests: read
+  # `checks: read` is required for route-by-ci-completion (#6) to
+  # enumerate check_runs in a completed suite. Callers of this reusable
+  # workflow who subscribe to `check_suite` MUST grant this or the
+  # failing-check name lookup will 403. See CHANGELOG 1.1.0.
+  checks: read
 
 jobs:
   route:
