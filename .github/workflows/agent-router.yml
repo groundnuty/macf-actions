@@ -322,13 +322,27 @@ jobs:
               fi
             fi
 
-            # CI-completion uses 'mention' NotifyPayload type for v2.0.0 — the
-            # schema (groundnuty/macf src/types.ts NotifyPayloadSchema) doesn't
-            # yet have a dedicated ci_completion variant; distinguished by
-            # source='ci_completion'. Follow-up to add a proper variant.
-            PAYLOAD=$(jq -n --arg type "mention" --arg source "ci_completion" \
-              --argjson issue_number "$PR_NUMBER" --arg message "$MESSAGE" \
-              '{type: $type, source: $source, issue_number: $issue_number, message: $message}')
+            # CI-completion payload shape matches CiCompletionPayloadSchema
+            # in groundnuty/macf src/types.ts (landed in macf#122 / 4e2be5b).
+            # failing_check_name is null on success, string on failure paths.
+            # The empty-string → null conversion is needed because `jq --arg`
+            # always produces a string; empty-string is how we indicate "no
+            # failing check" across the bash → jq boundary.
+            PAYLOAD=$(jq -n \
+              --arg type "ci_completion" --arg source "ci_completion" \
+              --argjson pr_number "$PR_NUMBER" --arg pr_title "$PR_TITLE" \
+              --arg pr_url "$PR_URL" --arg conclusion "$CHECK_SUITE_CONCLUSION" \
+              --arg failing_check_name "${FAILING:-}" --arg message "$MESSAGE" \
+              '{
+                type: $type,
+                source: $source,
+                pr_number: $pr_number,
+                pr_title: $pr_title,
+                pr_url: $pr_url,
+                conclusion: $conclusion,
+                failing_check_name: (if $failing_check_name == "" then null else $failing_check_name end),
+                message: $message
+              }')
 
             set +e
             HTTP_CODE=$(curl --silent --show-error \

@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] — 2026-04-17
+
+### Changed
+
+- `route-by-ci-completion` payload now uses `type: 'ci_completion'` with the full structured schema (`pr_number`, `pr_title`, `pr_url`, `conclusion`, `failing_check_name`, `message`) landed in `groundnuty/macf#122`. Receivers no longer need to disambiguate via `source: 'ci_completion'` — the `type` discriminator is sufficient.
+
+### Removed
+
+- v2.0.0 "Known limitation" note about the `type: 'mention'` shoehorn — resolved by this release.
+
+### Consumer action
+
+None. Patch-version bump: server-side `NotifyPayloadSchema.parse` already accepts both the old and new shape, so consumers on `@v2` auto-pick up the cleaner payload on next dispatch. No secret / variable / agent-config changes.
+
 ## [2.0.0] — 2026-04-17
 
 ### Changed — ⚠ breaking
@@ -35,9 +49,9 @@ Transport swapped from SSH + `tmux send-keys` to mTLS HTTPS POST to each agent's
 - **Mention / CI-completion on unreachable agent:** log-only (no label/comment). One missed comment shouldn't trip the offline flag.
 - **No SSH fallback.** v2 is hard-fail by design (macf-actions#8 Option A) — the whole point of migrating is to retire the SSH path cleanly.
 
-### Known limitation
+### Known limitation (resolved in v2.0.1)
 
-- `NotifyPayload.type='mention'` is used for CI-completion notifications in v2.0.0 because `groundnuty/macf`'s `NotifyPayloadSchema` doesn't yet have a dedicated `ci_completion` variant. Distinguished by `source='ci_completion'`. Follow-up: add the proper schema variant in `groundnuty/macf` and re-cut v2.0.1.
+- `NotifyPayload.type='mention'` was used for CI-completion notifications in v2.0.0 because `groundnuty/macf`'s `NotifyPayloadSchema` didn't yet have a dedicated `ci_completion` variant. Resolved in v2.0.1 after `groundnuty/macf#122` shipped the proper schema.
 
 ### Not removed (yet)
 
