@@ -203,7 +203,13 @@ jobs:
             APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].app_name // empty')
             [ "$ACTOR" = "${APP_NAME}[bot]" ] && continue
 
-            if echo "$BODY" | grep -qE "@(${AGENT_NAME}|${APP_NAME})\[bot\]"; then
+            # Fixed-string match instead of regex: $BODY is user-controlled
+            # (issue comment, PR body, review body). Regex interpretation
+            # risked catastrophic backtracking on crafted input (ReDoS) —
+            # filed as groundnuty/macf-actions#13. Semantically we want a
+            # literal substring check for "@<name>[bot]", which is exactly
+            # what `grep -F` does. Two `-e` terms cover the alternation.
+            if echo "$BODY" | grep -qF -e "@${AGENT_NAME}[bot]" -e "@${APP_NAME}[bot]"; then
               HOST=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].host // empty')
               PORT=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].port // empty')
               if [ -z "$HOST" ] || [ -z "$PORT" ]; then
