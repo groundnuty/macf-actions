@@ -1,0 +1,67 @@
+name: CI
+
+# Parity with groundnuty/macf's ci.yml (#15). The main product of this
+# repo is a reusable workflow consumed by downstream repos — any YAML
+# syntax or logic drift leaks to all callers on their next run. This
+# job catches regressions pre-merge.
+#
+# Two checks:
+#   - actionlint: validates workflow YAML (syntax, unused permissions,
+#     shell-injection-by-quotation, typos in contexts like ${{ ... }})
+#   - commitlint: enforces the same 13-type enum as groundnuty/macf so
+#     release-note derivation + `git log --grep='^security|^reliability'`
+#     work consistently across the two repos.
+#
+# Security note: all GitHub-context interpolations in run: scripts use
+# env: with quoted variable expansion rather than direct ${{ }} splicing.
+# Only `github.event.pull_request.{base,head}.sha` are used here — both
+# non-attacker-controllable — but the env-var pattern is best practice
+# for any future edits that add user-controllable inputs.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'commitlint.config.mjs'
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Run actionlint
+        # reviewdog/action-actionlint installs actionlint in-situ at a
+        # pinned tag. Non-critical tooling — a break here fails CI but
+        # cannot leak into the shipped reusable workflow.
+        uses: reviewdog/action-actionlint@v1
+        with:
+          fail_on_error: 'true'
+          reporter: github-pr-review
+
+  commitlint:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: 22
+
+      - name: Install commitlint
+        run: npm install -g @commitlint/cli @commitlint/config-conventional
+
+      - name: Lint commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: npx commitlint --from "$BASE_SHA" --to "$HEAD_SHA"
