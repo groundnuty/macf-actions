@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.3] — 2026-04-21
+
+### Fixed
+
+- **Composite-action checkout now pins to the reusable workflow's OWN ref** via `github.workflow_ref` parsing, not `github.workflow_sha`. In a reusable-workflow context, `github.workflow_sha` is the **caller's** commit SHA, not the reusable's — a documented GitHub Actions quirk ([community#31054](https://github.com/orgs/community/discussions/31054), [toolkit#1264](https://github.com/actions/toolkit/issues/1264)). v3.0.2's checkout passed the caller's SHA to `repository: groundnuty/macf-actions, ref: ...`, which 100% of the time is a SHA that doesn't exist in macf-actions's git history. `fatal: not our ref <sha>` at checkout, job failed. Closes [`groundnuty/macf-actions#25`](https://github.com/groundnuty/macf-actions/issues/25).
+
+### Fix shape
+
+New `Resolve reusable workflow ref` step parses `github.workflow_ref` (format: `owner/repo/.github/workflows/file.yml@refs/{tags,heads}/<ref>` or `...@<sha>`) via pure shell:
+
+```bash
+ref="${GH_WORKFLOW_REF##*@}"
+ref="${ref#refs/tags/}"
+ref="${ref#refs/heads/}"
+```
+
+Handles all three consumer pin forms (tag, branch, raw SHA). The subsequent `actions/checkout` uses the parsed ref, so the composite-action copy comes from the exact macf-actions commit/tag the caller invoked.
+
+### Root-cause pattern — 4th self-test blind spot
+
+This is the 4th v3-series bug (after #18, #20, #22) that passed macf-actions self-tests and broke live external callers. Self-routing runs with caller-workflow-SHA == reusable-workflow-SHA, hiding every cross-repo pinning bug. **#24 (external-caller smoke test per tag) is now the highest-priority infra item** — no more v3 patches should ship without it.
+
+### Unchanged (consumer migration not required)
+
+No consumer action required. Floating `@v3` moves on release; callers auto-pick up `v3.0.3` on next event.
+
 ## [3.0.2] — 2026-04-21
 
 ### Fixed
