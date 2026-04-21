@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Canonical-vector test for the toVariableSegment-equivalent shell transform
-# used by .github/actions/resolve-agent-endpoint/action.yml. Drift-catcher
-# paired with test/registry/variable-name.test.ts in groundnuty/macf —
-# if either side's logic diverges from the other, the matching test fails.
+# used inline in .github/workflows/agent-router.yml (route-by-label,
+# route-by-mention, route-by-ci-completion). Drift-catcher paired with
+# test/registry/variable-name.test.ts in groundnuty/macf — if either
+# side's logic diverges from the other, the matching test fails.
+#
+# Prior to v3.1.0 the transform lived in a composite action at
+# .github/actions/resolve-agent-endpoint/action.yml; inlined in #27 after
+# cross-repo checkout + github.workflow_ref quirks made the composite
+# more trouble than duplication-avoided.
 #
 # Keep the cases here in lockstep with:
 #   groundnuty/macf:test/registry/variable-name.test.ts

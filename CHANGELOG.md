@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] — 2026-04-21
+
+### Changed
+
+- **`resolve-agent-endpoint` composite action inlined into `route-by-label`.** Extracting to a composite was meant to dedupe across 3 jobs, but only `route-by-label` ever used it — `route-by-mention` and `route-by-ci-completion` already inline because they're loop-driven. Net duplication reduction = zero, but the composite pulled in a cross-repo dependency whose resolution hit two framework pitfalls:
+  - Step-level `uses:` doesn't evaluate `${{ github.* }}` (see [#22](https://github.com/groundnuty/macf-actions/issues/22)), forcing an intermediary `actions/checkout` step.
+  - `github.workflow_ref` is caller-scoped in reusable workflows (see [#25](https://github.com/groundnuty/macf-actions/issues/25)), so there's no reliable context-based way to pin the checkout at the reusable's own commit. v3.0.3 worked by coincidence when caller and reusable tracked the same branch; a silent-drift vector for tag-pinned consumers.
+- **Fix:** inlined the 15-line registry-lookup shell into `route-by-label` directly, parity with the two already-inline jobs. Eliminates:
+  - `.github/actions/resolve-agent-endpoint/` directory (removed).
+  - Cross-repo `actions/checkout` step (removed from route-by-label).
+  - `Resolve reusable workflow ref` step + its `github.workflow_ref` parse (removed).
+  - `actions/create-github-app-token@v3` call (no permission change — still same token minting, just in the inline path).
+- **Test drift-catcher retained:** `test/resolve-agent-endpoint-transform.sh` continues to run against the pure-shell transform (it tests the transform itself, not the wrapper); still paired with macf's `test/registry/variable-name.test.ts` per the canonical-vector-shared contract.
+
+### Removed — ⚠ visible surface change (hence minor bump, not patch)
+
+- `.github/actions/resolve-agent-endpoint/action.yml` directory is gone. Anyone who was directly referencing it via `uses: groundnuty/macf-actions/.github/actions/resolve-agent-endpoint@...` from their own workflow will fail. Extremely unlikely to affect any real consumer — the composite was documented as reusable-internal, never advertised as a standalone surface — but documented as breaking regardless per strict semver.
+
+### Unchanged (consumer migration not required for normal callers)
+
+Consumers who only `uses: .../agent-router.yml@v3` or `@v3.<minor>` continue to work unchanged. Floating `@v3` moves on release; next event picks up v3.1.0. No new inputs, no new secrets, no config schema change.
+
+### Related
+
+- #18 (original v3.0.0 composite extraction)
+- #22 (first cross-repo-checkout bug)
+- #25 (second — workflow_ref scoping)
+- #24 (CI: external-caller smoke test — still outstanding, higher priority than ever after this)
+
 ## [3.0.3] — 2026-04-21
 
 ### Fixed
