@@ -133,18 +133,34 @@ jobs:
       ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      # Check out groundnuty/macf-actions at the exact commit this
-      # reusable workflow was fetched from, so the composite action is
-      # present at its canonical path regardless of the caller repo.
-      # Without this step, `uses: ./.github/actions/resolve-agent-endpoint`
-      # below would resolve against the caller's filesystem where the
-      # composite doesn't exist. Context-substitution happens inside
-      # `with:`, which IS allowed (unlike step-level `uses:` refs
-      # which don't evaluate ${{ github.* }}). See macf-actions#22.
+      # Resolve the reusable workflow's OWN ref (tag / branch / SHA) for
+      # the cross-repo checkout below. `github.workflow_ref` is the full
+      # ref including repo+path+@ref, e.g.
+      #   groundnuty/macf-actions/.github/workflows/agent-router.yml@refs/tags/v3.0.3
+      # `github.workflow_sha`, despite the name, is the CALLER workflow's
+      # SHA in a reusable-workflow context (documented quirk; see
+      # github.com/orgs/community/discussions/31054). That's the exact
+      # class of bug v3.0.2 hit — #25. Parsing workflow_ref gives us the
+      # right ref for all three pin forms (tag / branch / raw SHA).
+      - name: Resolve reusable workflow ref
+        id: reusable_ref
+        env:
+          GH_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          ref="${GH_WORKFLOW_REF##*@}"
+          ref="${ref#refs/tags/}"
+          ref="${ref#refs/heads/}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+      # Check out groundnuty/macf-actions at the reusable's own ref so
+      # the composite action is present at its canonical path regardless
+      # of the caller. `uses: ./.github/actions/resolve-agent-endpoint`
+      # below resolves against this checked-out copy.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: groundnuty/macf-actions
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ steps.reusable_ref.outputs.ref }}
           sparse-checkout: .github/actions/resolve-agent-endpoint
           sparse-checkout-cone-mode: false
 
@@ -200,12 +216,11 @@ jobs:
       - name: Resolve agent endpoint from registry
         id: endpoint
         if: steps.gate.outputs.skip != 'true'
-        # Local path matches the sparse-checkout above. Step-level `uses:`
-        # refs can't evaluate ${{ github.* }} contexts, so we can't inline
-        # `groundnuty/macf-actions/.github/actions/...@${{ github.workflow_sha }}`
-        # here directly — the workaround is to check out macf-actions at
-        # that SHA in the previous step and `uses: ./...` against the
-        # local copy. See groundnuty/macf-actions#22.
+        # Local path matches the checkout above. Step-level `uses:` refs
+        # can't evaluate ${{ github.* }} contexts, so the workaround is
+        # to check out macf-actions at the reusable's own ref in an
+        # earlier step and `uses: ./...` against the local copy. See
+        # macf-actions#22 (original checkout) + #25 (workflow_ref fix).
         uses: ./.github/actions/resolve-agent-endpoint
         with:
           project: ${{ inputs.project }}
