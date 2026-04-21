@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] — 2026-04-21
+
+### Fixed
+
+- **Dropped `permission-variables: read` input from all 3 `actions/create-github-app-token@v3` steps.** That input isn't in `create-github-app-token@v3`'s schema (per-permission inputs map to GitHub Apps' [permission names](https://docs.github.com/en/rest/apps/apps#list-installations-for-the-authenticated-app), e.g. `permission-actions`, `permission-contents` — there's no `permission-variables` because actions-variables isn't separately exposable through that subset mechanism). v3.0.0 passed it anyway; GitHub's API received it as a subset-request and returned `422: "The permissions requested are not granted to this installation"`, blocking every routing event. Closes [`groundnuty/macf-actions#20`](https://github.com/groundnuty/macf-actions/issues/20).
+- The `macf-routing` App is minimum-scope by design (Organization Variables + Actions Variables read-only) — minting a token with the App's full default permission set is already the narrowest grant available, so no subset-request is needed or helpful here.
+
+### Unchanged (consumer migration not required)
+
+No consumer action required. Existing callers on `@v3` / `@v3.0.0` auto-pick up `v3.0.1` because the floating `v3` tag moves on release. No new secrets, no agent-config.json changes, no `with:` input changes. Just merge + tag.
+
+### Known deprecation warning (not yet fixed)
+
+`create-github-app-token@v3` warns that `app-id` is deprecated in favor of `client-id`. Fix is deferred to v4 (breaking: requires consumers to set `MACF_ROUTING_CLIENT_ID` secret instead of reusing `MACF_ROUTING_APP_ID`). Ignoring the warning in v3.0.1 keeps floating-tag consumers on v3 working.
+
 ## [3.0.0] — 2026-04-21
 
 ### Changed — ⚠ breaking

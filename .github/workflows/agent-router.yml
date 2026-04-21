@@ -179,7 +179,13 @@ jobs:
           app-id: ${{ secrets.MACF_ROUTING_APP_ID }}
           private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
           owner: ${{ github.repository_owner }}
-          permission-variables: read
+          # No permission-* subsetting: `macf-routing` is already a
+          # minimum-scope App (metadata:read + actions_variables:read).
+          # An earlier v3.0.0 iteration specified `permission-variables:
+          # read` but that input isn't recognized by
+          # actions/create-github-app-token@v3 — GitHub's API received
+          # it as a subset-request and 422'd with "permissions not
+          # granted to this installation". See groundnuty/macf-actions#20.
 
       - name: Resolve agent endpoint from registry
         id: endpoint
@@ -280,7 +286,13 @@ jobs:
           app-id: ${{ secrets.MACF_ROUTING_APP_ID }}
           private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
           owner: ${{ github.repository_owner }}
-          permission-variables: read
+          # No permission-* subsetting: `macf-routing` is already a
+          # minimum-scope App (metadata:read + actions_variables:read).
+          # An earlier v3.0.0 iteration specified `permission-variables:
+          # read` but that input isn't recognized by
+          # actions/create-github-app-token@v3 — GitHub's API received
+          # it as a subset-request and 422'd with "permissions not
+          # granted to this installation". See groundnuty/macf-actions#20.
 
       - name: Route to mentioned agents (mTLS POST)
         env:
@@ -410,7 +422,13 @@ jobs:
           app-id: ${{ secrets.MACF_ROUTING_APP_ID }}
           private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
           owner: ${{ github.repository_owner }}
-          permission-variables: read
+          # No permission-* subsetting: `macf-routing` is already a
+          # minimum-scope App (metadata:read + actions_variables:read).
+          # An earlier v3.0.0 iteration specified `permission-variables:
+          # read` but that input isn't recognized by
+          # actions/create-github-app-token@v3 — GitHub's API received
+          # it as a subset-request and 422'd with "permissions not
+          # granted to this installation". See groundnuty/macf-actions#20.
 
       - name: Route CI completion to agent-authored PRs (mTLS POST)
         env:
