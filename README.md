@@ -155,6 +155,15 @@ If an agent is unreachable, the workflow adds the `agent-offline` label so the a
 
 The v1 workflow uses SSH + tmux for message delivery. v2 will swap this for mTLS HTTP POST to each agent's channel endpoint (see [macf P3](https://github.com/groundnuty/macf/blob/main/design/phases/P3-cert-management.md) for the cert infrastructure). Consumers opt in by bumping `@v1` → `@v2`.
 
+## Contributing
+
+CI enforces two checks on PRs:
+
+1. **[actionlint](https://github.com/rhysd/actionlint)** — validates `.github/workflows/*.yml` for syntax, unused permissions, shell-injection-by-quotation, and typos in `${{ ... }}` contexts. Runs on every push and PR that touches workflows.
+2. **[commitlint](https://github.com/conventional-changelog/commitlint)** — enforces the 13-type enum shared with [`groundnuty/macf`](https://github.com/groundnuty/macf/blob/main/commitlint.config.mjs): `feat / fix / security / reliability / refactor / perf / docs / test / chore / ci / revert / build / style`. Parity across the two repos means release-note derivation + `git log --grep='^security|^reliability'` work consistently.
+
+PR subjects follow [Conventional Commits](https://www.conventionalcommits.org/) format with one of those types. Subject capped at 100 chars (`@commitlint/config-conventional` default).
+
 ## See also
 
 - [MACF framework](https://github.com/groundnuty/macf) — agent implementation, CLI, plugin
