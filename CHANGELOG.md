@@ -10,6 +10,16 @@ Agent endpoint resolution moved from caller's `agent-config.json` to the MACF re
 
 Same release also parameterizes the CA-cert variable name by project (was hardcoded `PROJECT_CA_CERT`, now `<PROJECT>_CA_CERT` matching the `macf certs init` convention). Eliminates a second drift vector flagged in the same issue thread.
 
+### Prerequisites
+
+v3 assumes the consumer has already gone through the standard MACF bootstrap for its project:
+
+- **`macf repo-init`** has run in the consumer repo → `agent-config.json` exists, labels + project field are populated.
+- **`macf certs init`** has run → the `<PROJECT>_CA_CERT` variable is set at the vars-accessible scope (caller repo level, or org-with-visibility).
+- **Each agent has registered at least once** on its runtime host → `<PROJECT>_AGENT_<NAME>` exists in the registry with current `host` + `port`. Agents re-register on every channel-server start, so a running MACF system already satisfies this.
+
+If any of these are missing, v3 either fails at token-mint (missing App secrets) or produces registry-miss at routing time (agent never registered). See the failure-semantics table below for what happens per path.
+
 ### Migration for consumers upgrading `@v2` → `@v3`
 
 1. **Create a dedicated `macf-routing` GitHub App**, if one doesn't exist yet:

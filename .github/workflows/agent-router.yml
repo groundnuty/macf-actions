@@ -37,10 +37,11 @@ name: Agent Router (reusable, v3 — registry-driven mTLS transport)
 #                             (uppercase + hyphen→underscore). Set by
 #                             `macf certs init` at Phase 3 of the deployment.
 #   caller's agent-config.json:
-#     Each agent entry needs `app_name` (for actor-comparison skip) and
-#     (optionally) `tmux_session` for v1 compatibility callers. `host`
-#     and `port` fields are ignored — the registry is the single source
-#     of truth for addressing.
+#     Each agent entry needs `app_name` (used for actor-comparison skip).
+#     Legacy fields carried over from v1.x / v2.x consumers (`host`,
+#     `port`, `tmux_session`, `tmux_bin`, `ssh_user`, `ssh_key_secret`)
+#     may remain in the file but are unread under v3 — the registry is
+#     the single source of truth for addressing.
 
 on:
   workflow_call:
