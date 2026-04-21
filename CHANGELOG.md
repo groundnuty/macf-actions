@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Reliability
+
+- **New CI job `blind-spot-lint`** (`test/blind-spot-lint.sh`). Static-analysis guard against 3 specific YAML patterns that have shipped broken external-caller behavior in v3.0.x: `permission-variables:` on `create-github-app-token@v3` (#20), local `uses: ./.github/actions/...` in a reusable workflow (#22), `github.workflow_sha` in a reusable workflow (#25). Each pattern references the issue that introduced it so future contributors see not just "forbidden" but *why*. Runs in `.github/workflows/ci.yml` on every push + PR. Partial close on [#24](https://github.com/groundnuty/macf-actions/issues/24); dynamic external-caller smoke remains outstanding.
+- **`README.md` Contributing section** documents the lint's existence, the 3 patterns, and the self-test-blind-spot pattern that motivates it.
+
+No workflow / consumer changes in this release slot. Functional behavior unchanged.
+
 ## [3.1.0] — 2026-04-21
 
 ### Changed
