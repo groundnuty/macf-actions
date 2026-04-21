@@ -2,6 +2,54 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] — 2026-04-21
+
+### Changed — ⚠ breaking
+
+Agent endpoint resolution moved from caller's `agent-config.json` to the MACF registry (GitHub Variables per DR-005/DR-006/DR-007). v2.0.1 read `.host` and `.port` from `agent-config.json` per-agent entries, which contradicted DR-007 ("anyone who needs the port reads the variable, not a config file") and forced operators to pin ports manually — losing the multi-agent-on-one-VM property dynamic port assignment was designed for. v3 restores the original design: each agent self-registers its runtime host+port under `<PROJECT>_AGENT_<NAME>` at bind time; the routing workflow resolves from the registry on every event. Closes [`groundnuty/macf-actions#18`](https://github.com/groundnuty/macf-actions/issues/18).
+
+Same release also parameterizes the CA-cert variable name by project (was hardcoded `PROJECT_CA_CERT`, now `<PROJECT>_CA_CERT` matching the `macf certs init` convention). Eliminates a second drift vector flagged in the same issue thread.
+
+### Migration for consumers upgrading `@v2` → `@v3`
+
+1. **Create a dedicated `macf-routing` GitHub App**, if one doesn't exist yet:
+   - Owner: your registry-holding org (typically the same org as your consumer repo, or `groundnuty` for personal-account projects).
+   - Permissions: **only** `Organization variables: Read`. Nothing else. This App exists solely to mint short-lived registry-read tokens; minimum-scope App = minimum blast radius if creds ever leak.
+   - Install on the registry org.
+   - Generate a private key.
+
+2. **Add these secrets** to each consumer repo:
+   - `MACF_ROUTING_APP_ID` — App ID from step 1
+   - `MACF_ROUTING_APP_KEY` — PEM private key from step 1
+
+3. **Pass the new required input** in your caller workflow:
+   ```yaml
+   jobs:
+     route:
+       uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v3.0.0
+       with:
+         project: <your-project-name>  # e.g. academic-resume
+       secrets: inherit
+   ```
+   Optional: override `registry-api-path` if your registry isn't in the caller's org (default is `/orgs/${{ github.repository_owner }}`). Use `/repos/<user>/<user>` for DR-006 profile scope.
+
+4. **Rename your CA-cert variable** from `PROJECT_CA_CERT` to `<PROJECT_SEG>_CA_CERT` where `<PROJECT_SEG>` is your project name uppercased with hyphens→underscores (e.g. `academic-resume` → `ACADEMIC_RESUME_CA_CERT`). Matches what `macf certs init` already writes; the v2.0.1 workflow was looking at the wrong name. After confirming v3 works, delete the legacy `PROJECT_CA_CERT` variable.
+
+5. **Slim down `agent-config.json`** — `host` and `port` are no longer read. Keep `app_name` per agent (for attribution-skip) and `label_to_status`. Can leave `tmux_session`/`tmux_bin` in place for eventual v1 callers but they have no effect under v3.
+
+6. **Verify agent self-registration is working.** Your agents must register their runtime host+port to `<PROJECT_SEG>_AGENT_<AGENT_NAME_SEG>` at startup (standard `macf` channel-server behavior since P2). If you're adopting v3 on a project that skipped registration, agents won't resolve from registry.
+
+### Failure semantics (updated)
+
+- **Registry-miss on label routing:** applies `agent-offline` label + comment. Same UX as v2.0.1's `agent-config.json` miss.
+- **Registry-miss on mention / CI-completion:** log-only skip. A missing registration for one event shouldn't page.
+- **Token-mint failure (bad `MACF_ROUTING_APP_*` secrets):** fails the job loudly at the `actions/create-github-app-token@v3` step with a clear error.
+
+### Non-goals (deferred)
+
+- **Cross-org registry federation** (multiple registry scopes per caller) — parameterizable via `registry-api-path` already; no further per-agent override in v3. If a consumer needs agents registered in different scopes, file an issue.
+- **macf-actions self-routing bump** (`routing.yml` in this repo) — stays on `@v1.3.0` for this release. Self-bump after v3.0.0 is tagged + the `macf-routing` App + secrets are in place.
+
 ## [2.0.1] — 2026-04-17
 
 ### Changed

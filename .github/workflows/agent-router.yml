@@ -1,23 +1,65 @@
-name: Agent Router (reusable, v2 — mTLS transport)
+name: Agent Router (reusable, v3 — registry-driven mTLS transport)
 
 # Reusable workflow for routing GitHub events (issues, comments, PRs,
-# check_suites) to MACF agents. v2 delivers notifications via mTLS
-# HTTPS POST to each agent's /notify endpoint; v1.x used SSH + tmux
-# send-keys. See CHANGELOG and macf-actions#8 for the migration.
+# check_suites) to MACF agents. v3 resolves each agent's host + port
+# from the MACF registry (GitHub Variables per DR-005/DR-006/DR-007)
+# instead of reading them from the caller's agent-config.json. This
+# closes the v2.0.1 DR-007 violation (see macf-actions#18) and restores
+# the dynamic-port-assignment property that lets multiple agents share
+# a VM without operator-managed port coordination.
+#
+# v3 is a breaking change vs v2.0.1. See CHANGELOG §3.0.0 for the
+# consumer migration steps (new secrets, new inputs, agent-config.json
+# schema slim-down).
 #
 # Caller requirements:
+#   inputs:
+#     project               — project name used to derive registry variable
+#                             names (e.g. `academic-resume` →
+#                             `ACADEMIC_RESUME_AGENT_<NAME>` and
+#                             `ACADEMIC_RESUME_CA_CERT`). Required.
+#     registry-api-path     — API path prefix for the registry scope
+#                             (omit trailing /actions/variables). Covers
+#                             all three DR-006 scopes: org, profile, repo.
+#                             Optional; defaults to `/orgs/<caller-owner>`.
 #   secrets:
-#     ROUTING_CLIENT_CERT — base64 PEM, minted via `macf certs issue-routing-client`
-#     ROUTING_CLIENT_KEY  — base64 PEM, ditto
-#     TS_OAUTH_CLIENT_ID  — Tailscale OAuth client ID (runner reaches agent VM over Tailscale)
-#     TS_OAUTH_SECRET     — Tailscale OAuth secret
-#   vars:
-#     PROJECT_CA_CERT     — public PEM of the project CA (from `macf certs init`)
+#     ROUTING_CLIENT_CERT   — base64 PEM, minted via `macf certs issue-routing-client`
+#     ROUTING_CLIENT_KEY    — base64 PEM, ditto
+#     TS_OAUTH_CLIENT_ID    — Tailscale OAuth client ID (runner → agent VM)
+#     TS_OAUTH_SECRET       — Tailscale OAuth secret
+#     MACF_ROUTING_APP_ID   — GitHub App ID for a variables:read-only App
+#                             installed on the registry org (see §3.0.0
+#                             migration for dedicated-App rationale).
+#     MACF_ROUTING_APP_KEY  — PEM private key for the above App.
+#   vars (on the caller repo, org, or enclosing scope):
+#     <PROJECT_SEG>_CA_CERT — public PEM of the project CA. Name is derived
+#                             from `inputs.project` via toVariableSegment
+#                             (uppercase + hyphen→underscore). Set by
+#                             `macf certs init` at Phase 3 of the deployment.
 #   caller's agent-config.json:
-#     Each agent must have `host` AND `port` fields (port added in v2).
+#     Each agent entry needs `app_name` (for actor-comparison skip) and
+#     (optionally) `tmux_session` for v1 compatibility callers. `host`
+#     and `port` fields are ignored — the registry is the single source
+#     of truth for addressing.
 
 on:
   workflow_call:
+    inputs:
+      project:
+        description: >-
+          Project name used to derive registry variable names. Must match
+          the `project` field in the agent's `.macf/macf-agent.json`.
+        type: string
+        required: true
+      registry-api-path:
+        description: >-
+          GitHub REST API path prefix for the MACF registry, without trailing
+          `/actions/variables`. Examples per DR-006: `/orgs/<org>` for org
+          scope, `/repos/<user>/<user>` for profile scope, `/repos/<o>/<r>`
+          for repo scope.
+        type: string
+        required: false
+        default: /orgs/${{ github.repository_owner }}
     secrets:
       ROUTING_CLIENT_CERT:
         description: Base64 PEM of the routing-action client certificate
@@ -30,6 +72,14 @@ on:
         required: true
       TS_OAUTH_SECRET:
         description: Tailscale OAuth secret for the GHA runner
+        required: true
+      MACF_ROUTING_APP_ID:
+        description: >-
+          GitHub App ID for the variables:read-only App that mints registry
+          access tokens. Dedicated App keeps blast radius small.
+        required: true
+      MACF_ROUTING_APP_KEY:
+        description: PEM private key for the MACF_ROUTING App
         required: true
 
 permissions:
@@ -45,6 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       agents: ${{ steps.load.outputs.agents }}
+      project-seg: ${{ steps.compute.outputs.project-seg }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -56,6 +107,16 @@ jobs:
         run: |
           echo "agents=$(jq -c '.agents' .github/agent-config.json)" >> "$GITHUB_OUTPUT"
 
+      - name: Compute toVariableSegment(project) for downstream vars lookup
+        id: compute
+        env:
+          RAW_PROJECT: ${{ inputs.project }}
+        run: |
+          set -euo pipefail
+          : "${RAW_PROJECT:?project input must not be empty}"
+          seg=$(printf '%s' "$RAW_PROJECT" | tr '[:lower:]-' '[:upper:]_')
+          echo "project-seg=${seg}" >> "$GITHUB_OUTPUT"
+
   # ─── LABEL ROUTING ───
   route-by-label:
     needs: config
@@ -66,11 +127,16 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
-      PROJECT_CA_CERT: ${{ vars.PROJECT_CA_CERT }}
+      PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
       ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
       ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: .github/actions/resolve-agent-endpoint
+          sparse-checkout-cone-mode: false
+
       - name: Connect to Tailscale
         uses: tailscale/github-action@v3
         with:
@@ -81,35 +147,61 @@ jobs:
       - name: Wait for Tailscale network
         run: sleep 10
 
-      - name: Route to agent by label (mTLS POST)
+      - name: Label gate (skip non-agent labels + self-routing)
+        id: gate
         env:
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
           EVENT_LABEL: ${{ github.event.label.name }}
           ACTOR: ${{ github.event.sender.login }}
         run: |
           set -euo pipefail
-
           LABEL="$EVENT_LABEL"
-          HOST=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].host // empty')
-          if [ -z "$HOST" ]; then
+          APP_NAME=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].app_name // empty')
+          if [ -z "$APP_NAME" ]; then
             echo "Label '$LABEL' is not an agent label, skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
-          APP_NAME=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].app_name // empty')
           if [ "$ACTOR" = "${APP_NAME}[bot]" ]; then
             echo "Actor is the same agent, skipping self-routing"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "agent-name=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "app-name=$APP_NAME" >> "$GITHUB_OUTPUT"
 
-          PORT=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].port // empty')
-          if [ -z "$PORT" ]; then
-            echo "Agent '$LABEL' missing 'port' field in agent-config.json (required in v2)" >&2
-            exit 1
-          fi
+      - name: Mint registry-read token
+        id: registry-token
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.MACF_ROUTING_APP_ID }}
+          private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-variables: read
 
-          # NotifyPayload per groundnuty/macf src/types.ts.
+      - name: Resolve agent endpoint from registry
+        id: endpoint
+        if: steps.gate.outputs.skip != 'true'
+        uses: ./.github/actions/resolve-agent-endpoint
+        with:
+          project: ${{ inputs.project }}
+          agent-name: ${{ steps.gate.outputs.agent-name }}
+          registry-api-path: ${{ inputs.registry-api-path }}
+          registry-token: ${{ steps.registry-token.outputs.token }}
+
+      - name: Route to agent by label (mTLS POST)
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          LABEL: ${{ steps.gate.outputs.agent-name }}
+          APP_NAME: ${{ steps.gate.outputs.app-name }}
+          HOST: ${{ steps.endpoint.outputs.host }}
+          PORT: ${{ steps.endpoint.outputs.port }}
+        run: |
+          set -euo pipefail
+
           PAYLOAD=$(jq -n \
             --arg type "issue_routed" --arg source "label" \
             --argjson issue_number "$ISSUE_NUMBER" --arg title "$ISSUE_TITLE" \
@@ -117,7 +209,7 @@ jobs:
 
           TMPDIR=$(mktemp -d)
           trap 'rm -rf "$TMPDIR"' EXIT
-          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "PROJECT_CA_CERT var unset" >&2; exit 1; }
+          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "CA-cert var empty — check <PROJECT>_CA_CERT is set" >&2; exit 1; }
           printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
           echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
           echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
@@ -144,6 +236,17 @@ jobs:
             --body "Agent \`${APP_NAME}[bot]\` is offline. Issue will be picked up when the agent starts."
           exit 1
 
+      - name: Handle registry-miss as agent-offline
+        if: steps.gate.outputs.skip != 'true' && failure() && steps.endpoint.outcome == 'failure'
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          APP_NAME: ${{ steps.gate.outputs.app-name }}
+        run: |
+          set -euo pipefail
+          gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "agent-offline"
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "Agent \`${APP_NAME}[bot]\` is not registered (registry miss). Issue will be picked up when the agent starts and registers."
+
   # ─── @MENTION ROUTING ───
   route-by-mention:
     needs: config
@@ -154,9 +257,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
-      PROJECT_CA_CERT: ${{ vars.PROJECT_CA_CERT }}
+      PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
       ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
       ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
+      PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
     steps:
       - name: Connect to Tailscale
         uses: tailscale/github-action@v3
@@ -167,6 +271,15 @@ jobs:
 
       - name: Wait for Tailscale network
         run: sleep 10
+
+      - name: Mint registry-read token
+        id: registry-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.MACF_ROUTING_APP_ID }}
+          private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-variables: read
 
       - name: Route to mentioned agents (mTLS POST)
         env:
@@ -180,6 +293,8 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          REG_TOKEN: ${{ steps.registry-token.outputs.token }}
+          REG_PATH: ${{ inputs.registry-api-path }}
         run: |
           set -euo pipefail
 
@@ -193,7 +308,7 @@ jobs:
           [ "$ACTOR" = "github-actions[bot]" ] && { echo "skip github-actions[bot]"; exit 0; }
 
           TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
-          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "PROJECT_CA_CERT unset" >&2; exit 1; }
+          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "CA-cert var empty — check <PROJECT>_CA_CERT is set" >&2; exit 1; }
           printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
           echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
           echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
@@ -210,10 +325,25 @@ jobs:
             # literal substring check for "@<name>[bot]", which is exactly
             # what `grep -F` does. Two `-e` terms cover the alternation.
             if echo "$BODY" | grep -qF -e "@${AGENT_NAME}[bot]" -e "@${APP_NAME}[bot]"; then
-              HOST=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].host // empty')
-              PORT=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].port // empty')
+              # Inline registry lookup: loop-driven, so `uses: composite`
+              # isn't an option here (steps are static). Transform identical
+              # to .github/actions/resolve-agent-endpoint and covered by
+              # test/resolve-agent-endpoint-transform.sh.
+              AGENT_SEG=$(printf '%s' "$AGENT_NAME" | tr '[:lower:]-' '[:upper:]_')
+              VAR_NAME="${PROJECT_SEG}_AGENT_${AGENT_SEG}"
+
+              set +e
+              ENTRY=$(GH_TOKEN="$REG_TOKEN" gh api "${REG_PATH}/actions/variables/${VAR_NAME}" --jq '.value' 2>/dev/null)
+              API_RC=$?
+              set -e
+              if [ "$API_RC" -ne 0 ] || [ -z "$ENTRY" ]; then
+                echo "Registry miss for ${AGENT_NAME} (${VAR_NAME}); skipping mention route"
+                continue
+              fi
+              HOST=$(echo "$ENTRY" | jq -r '.host // empty')
+              PORT=$(echo "$ENTRY" | jq -r '.port // empty')
               if [ -z "$HOST" ] || [ -z "$PORT" ]; then
-                echo "Agent ${AGENT_NAME} missing host/port; skipping" >&2
+                echo "Registry entry ${VAR_NAME} missing host or port; skipping" >&2
                 continue
               fi
 
@@ -247,7 +377,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
-      PROJECT_CA_CERT: ${{ vars.PROJECT_CA_CERT }}
+      PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
       ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
       ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -255,7 +385,13 @@ jobs:
       CHECK_SUITE_HEAD_SHA: ${{ github.event.check_suite.head_sha }}
       CHECK_SUITE_CONCLUSION: ${{ github.event.check_suite.conclusion }}
       REPO: ${{ github.repository }}
+      PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: .github/actions/resolve-agent-endpoint
+          sparse-checkout-cone-mode: false
+
       - name: Connect to Tailscale
         uses: tailscale/github-action@v3
         with:
@@ -266,7 +402,19 @@ jobs:
       - name: Wait for Tailscale network
         run: sleep 10
 
+      - name: Mint registry-read token
+        id: registry-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.MACF_ROUTING_APP_ID }}
+          private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-variables: read
+
       - name: Route CI completion to agent-authored PRs (mTLS POST)
+        env:
+          REG_TOKEN: ${{ steps.registry-token.outputs.token }}
+          REG_PATH: ${{ inputs.registry-api-path }}
         run: |
           set -euo pipefail
 
@@ -279,7 +427,7 @@ jobs:
           [ -z "$PR_NUMBERS" ] && { echo "No PR for SHA ${CHECK_SUITE_HEAD_SHA}; skipping"; exit 0; }
 
           TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
-          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "PROJECT_CA_CERT unset" >&2; exit 1; }
+          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "CA-cert var empty — check <PROJECT>_CA_CERT is set" >&2; exit 1; }
           printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
           echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
           echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
@@ -308,10 +456,21 @@ jobs:
             done
             [ -z "$AGENT_NAME" ] && { echo "PR #${PR_NUMBER} author '${PR_AUTHOR}' not a registered agent; skipping"; continue; }
 
-            HOST=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].host // empty')
-            PORT=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].port // empty')
+            # Same inline-lookup justification as route-by-mention: loop-driven.
+            AGENT_SEG=$(printf '%s' "$AGENT_NAME" | tr '[:lower:]-' '[:upper:]_')
+            VAR_NAME="${PROJECT_SEG}_AGENT_${AGENT_SEG}"
+            set +e
+            ENTRY=$(GH_TOKEN="$REG_TOKEN" gh api "${REG_PATH}/actions/variables/${VAR_NAME}" --jq '.value' 2>/dev/null)
+            API_RC=$?
+            set -e
+            if [ "$API_RC" -ne 0 ] || [ -z "$ENTRY" ]; then
+              echo "Registry miss for ${AGENT_NAME} (${VAR_NAME}); skipping CI-completion route"
+              continue
+            fi
+            HOST=$(echo "$ENTRY" | jq -r '.host // empty')
+            PORT=$(echo "$ENTRY" | jq -r '.port // empty')
             if [ -z "$HOST" ] || [ -z "$PORT" ]; then
-              echo "Agent ${AGENT_NAME} missing host/port in agent-config.json; skipping" >&2
+              echo "Registry entry ${VAR_NAME} missing host or port; skipping" >&2
               continue
             fi
 
