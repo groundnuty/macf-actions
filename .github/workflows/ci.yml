@@ -45,6 +45,20 @@ jobs:
           fail_on_error: 'true'
           reporter: github-pr-review
 
+  blind-spot-lint:
+    runs-on: ubuntu-latest
+    # Defense-in-depth against the 3 known self-test-blind-spot patterns
+    # that bit v3.0.0 through v3.0.3 in quick succession (#20, #22, #25).
+    # Each is invisible to macf-actions's own self-routing tests (caller
+    # == reusable) but 100% broken for external callers. This job
+    # greps for those specific patterns re-appearing. Doesn't catch the
+    # full blind-spot class — full dynamic external-caller smoke is
+    # still TBD per the rest of #24.
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Run blind-spot lint
+        run: ./test/blind-spot-lint.sh
+
   commitlint:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'

@@ -169,12 +169,17 @@ The workflow provides four jobs:
 
 ## Contributing
 
-CI enforces two checks on PRs:
+CI enforces three checks on PRs:
 
 1. **[actionlint](https://github.com/rhysd/actionlint)** — validates `.github/workflows/*.yml` for syntax, unused permissions, shell-injection-by-quotation, and typos in `${{ ... }}` contexts. Runs on every push and PR that touches workflows.
 2. **[commitlint](https://github.com/conventional-changelog/commitlint)** — enforces the 13-type enum shared with [`groundnuty/macf`](https://github.com/groundnuty/macf/blob/main/commitlint.config.mjs): `feat / fix / security / reliability / refactor / perf / docs / test / chore / ci / revert / build / style`. Parity across the two repos means release-note derivation + `git log --grep='^security|^reliability'` work consistently.
+3. **blind-spot-lint** (`test/blind-spot-lint.sh`) — static-analysis guard against the 3 known patterns that have shipped broken external-caller behavior in v3.0.x: `permission-variables:` on `create-github-app-token@v3` (#20), local `uses: ./.github/actions/...` in a reusable workflow (#22), and `github.workflow_sha` in a reusable workflow (#25). Each is invisible to macf-actions's own self-routing tests but 100% broken for every consumer.
 
 PR subjects follow [Conventional Commits](https://www.conventionalcommits.org/) format with one of those types. Subject capped at 100 chars (`@commitlint/config-conventional` default).
+
+### Why blind-spot lint exists
+
+macf-actions's self-routing workflow invokes `agent-router.yml` with this repo as both producer AND consumer. Bugs specific to cross-repo consumption pass self-tests green. **Four bugs shipped to external callers in a single day because of that pattern** (v2.0.1 port-config #18, v3.0.0 permission input #20, v3.0.0–v3.0.2 composite checkout #22/#25, v3.0.2 workflow_sha scoping #25). Static lint catches the three known pattern-classes pre-merge as a partial mitigation. Full dynamic external-caller smoke per tag is still outstanding (see [#24](https://github.com/groundnuty/macf-actions/issues/24)); lint covers the common regressions until that infrastructure lands.
 
 ## See also
 
