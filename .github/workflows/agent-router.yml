@@ -133,8 +133,18 @@ jobs:
       ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      # Check out groundnuty/macf-actions at the exact commit this
+      # reusable workflow was fetched from, so the composite action is
+      # present at its canonical path regardless of the caller repo.
+      # Without this step, `uses: ./.github/actions/resolve-agent-endpoint`
+      # below would resolve against the caller's filesystem where the
+      # composite doesn't exist. Context-substitution happens inside
+      # `with:`, which IS allowed (unlike step-level `uses:` refs
+      # which don't evaluate ${{ github.* }}). See macf-actions#22.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          repository: groundnuty/macf-actions
+          ref: ${{ github.workflow_sha }}
           sparse-checkout: .github/actions/resolve-agent-endpoint
           sparse-checkout-cone-mode: false
 
@@ -190,6 +200,12 @@ jobs:
       - name: Resolve agent endpoint from registry
         id: endpoint
         if: steps.gate.outputs.skip != 'true'
+        # Local path matches the sparse-checkout above. Step-level `uses:`
+        # refs can't evaluate ${{ github.* }} contexts, so we can't inline
+        # `groundnuty/macf-actions/.github/actions/...@${{ github.workflow_sha }}`
+        # here directly — the workaround is to check out macf-actions at
+        # that SHA in the previous step and `uses: ./...` against the
+        # local copy. See groundnuty/macf-actions#22.
         uses: ./.github/actions/resolve-agent-endpoint
         with:
           project: ${{ inputs.project }}
@@ -400,11 +416,10 @@ jobs:
       REPO: ${{ github.repository }}
       PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          sparse-checkout: .github/actions/resolve-agent-endpoint
-          sparse-checkout-cone-mode: false
-
+      # No composite-action checkout here — route-by-ci-completion
+      # uses the inline registry lookup (loop-driven, can't use the
+      # composite). Previously had a sparse-checkout as defensive
+      # leftover; removed in v3.0.2. See groundnuty/macf-actions#22.
       - name: Connect to Tailscale
         uses: tailscale/github-action@v3
         with:

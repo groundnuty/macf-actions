@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.2] — 2026-04-21
+
+### Fixed
+
+- **Composite action `resolve-agent-endpoint` now loads from `groundnuty/macf-actions` regardless of caller.** v3.0.0–v3.0.1 called `uses: ./.github/actions/resolve-agent-endpoint` after a local sparse-checkout — which worked in macf-actions self-tests (checkout fetches macf-actions itself) but broke for every external caller (checkout fetches the caller's repo, where the composite doesn't exist). Route-by-label then errored with `Can't find 'action.yml' ... under .github/actions/resolve-agent-endpoint` and fell through to the `agent-offline` path. The END symptom was misleading — consumers saw "agent is not registered" comments for agents that were actually registered fine. Closes [`groundnuty/macf-actions#22`](https://github.com/groundnuty/macf-actions/issues/22).
+- **Fix:** the `actions/checkout` preceding the composite now explicitly pulls `groundnuty/macf-actions` at `${{ github.workflow_sha }}` (the reusable-workflow's own commit SHA — immutably pinned). The local `uses: ./...` then resolves against that checked-out copy. Step-level `uses:` refs can't evaluate `${{ github.* }}` contexts directly, so the cross-repo-at-workflow-SHA pattern requires the explicit checkout intermediary.
+
+### Removed
+
+- **Dead sparse-checkout step in `route-by-ci-completion`.** Defensive leftover from v3.0.0 authoring — that job uses inline registry lookup (not the composite action), so the composite-action checkout was never needed. Dropping it in v3.0.2 saves ~30s per CI-completion event.
+
+### Self-test blind spot — recurring theme
+
+This is the 3rd v3 bug caught by a live external caller (after #18 port-config and #20 permission-variables). macf-actions's self-routing tests run in a context where the caller IS macf-actions, which hides any bug that's specific to cross-repo consumers. Follow-up: add an automated external-caller smoke test per tag before promoting floating majors. Filing as a separate issue after v3.0.2 ships.
+
+### Unchanged (consumer migration not required)
+
+No consumer action required. Floating `@v3` moves on release; callers auto-pick up `v3.0.2` on next event.
+
 ## [3.0.1] — 2026-04-21
 
 ### Fixed
