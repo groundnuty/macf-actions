@@ -4,12 +4,15 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Added — visible payload-shape change (hence minor bump on next release)
+
+- **`route-by-label` payload now includes `repo` field** ([#30](https://github.com/groundnuty/macf-actions/issues/30)). Multi-homed agents (e.g. `macf-code-agent[bot]` serving `macf` + `macf-testbed` + `macf-marketplace` + `macf-actions`) need the origin-repo for any subsequent `gh issue view` they run; bare `gh issue view N` defaults to the cwd's repo otherwise, so a routing event from `macf-testbed` could resolve to a stale `macf#N` on the receiver side. The `repo` field carries `${{ github.repository }}` from the routing context so receivers can render `--repo` into the prompt without guessing. Receivers built against the prior payload shape ignore the extra field; consumers who want the new behavior need a receiver-side update (in macf, see notify-formatter.ts).
+- **`NotifyPayloadSchema` extension** assumed on the receiver: optional `repo` field on the `issue_routed` variant. macf's schema + formatter landed in parallel ([groundnuty/macf#237](https://github.com/groundnuty/macf/pull/237)).
+
 ### Reliability
 
 - **New CI job `blind-spot-lint`** (`test/blind-spot-lint.sh`). Static-analysis guard against 3 specific YAML patterns that have shipped broken external-caller behavior in v3.0.x: `permission-variables:` on `create-github-app-token@v3` (#20), local `uses: ./.github/actions/...` in a reusable workflow (#22), `github.workflow_sha` in a reusable workflow (#25). Each pattern references the issue that introduced it so future contributors see not just "forbidden" but *why*. Runs in `.github/workflows/ci.yml` on every push + PR. Partial close on [#24](https://github.com/groundnuty/macf-actions/issues/24); dynamic external-caller smoke remains outstanding.
 - **`README.md` Contributing section** documents the lint's existence, the 3 patterns, and the self-test-blind-spot pattern that motivates it.
-
-No workflow / consumer changes in this release slot. Functional behavior unchanged.
 
 ## [3.1.0] — 2026-04-21
 

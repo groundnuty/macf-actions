@@ -225,6 +225,7 @@ jobs:
         env:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
+          REPO: ${{ github.repository }}
           LABEL: ${{ steps.gate.outputs.agent-name }}
           APP_NAME: ${{ steps.gate.outputs.app-name }}
           HOST: ${{ steps.endpoint.outputs.host }}
@@ -232,10 +233,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          # `repo` field added per macf-actions#30 — multi-homed agents
+          # (e.g. macf-code-agent serving macf + macf-testbed +
+          # macf-marketplace) need the origin-repo for any subsequent
+          # `gh issue view` they run; bare issue numbers default to the
+          # cwd's repo otherwise. Mirrors the route-by-mention path,
+          # which has carried `--repo` in its MESSAGE since v2.0.
           PAYLOAD=$(jq -n \
             --arg type "issue_routed" --arg source "label" \
             --argjson issue_number "$ISSUE_NUMBER" --arg title "$ISSUE_TITLE" \
-            '{type: $type, source: $source, issue_number: $issue_number, title: $title}')
+            --arg repo "$REPO" \
+            '{type: $type, source: $source, issue_number: $issue_number, title: $title, repo: $repo}')
 
           TMPDIR=$(mktemp -d)
           trap 'rm -rf "$TMPDIR"' EXIT
