@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file. The format 
 ### Added — visible payload-shape change (hence minor bump on next release)
 
 - **`route-by-label` payload now includes `repo` field** ([#30](https://github.com/groundnuty/macf-actions/issues/30)). Multi-homed agents (e.g. `macf-code-agent[bot]` serving `macf` + `macf-testbed` + `macf-marketplace` + `macf-actions`) need the origin-repo for any subsequent `gh issue view` they run; bare `gh issue view N` defaults to the cwd's repo otherwise, so a routing event from `macf-testbed` could resolve to a stale `macf#N` on the receiver side. The `repo` field carries `${{ github.repository }}` from the routing context so receivers can render `--repo` into the prompt without guessing. Receivers built against the prior payload shape ignore the extra field; consumers who want the new behavior need a receiver-side update (in macf, see notify-formatter.ts).
-- **`NotifyPayloadSchema` extension** assumed on the receiver: optional `repo` field on the `issue_routed` variant. macf's schema landed in parallel ([macf#TODO](https://github.com/groundnuty/macf/issues/TODO) — link to be added when PR opens).
+- **`NotifyPayloadSchema` extension** assumed on the receiver: optional `repo` field on the `issue_routed` variant. macf's schema + formatter landed in parallel ([groundnuty/macf#237](https://github.com/groundnuty/macf/pull/237)).
 
 ### Reliability
 
