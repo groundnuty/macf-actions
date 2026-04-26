@@ -351,6 +351,32 @@ jobs:
 
           [ "$ACTOR" = "github-actions[bot]" ] && { echo "skip github-actions[bot]"; exit 0; }
 
+          # Strip Markdown code-context from $BODY before the @mention match
+          # (groundnuty/macf-actions#33). PR/issue/review bodies that mention
+          # @bot[bot] inside ```...``` fences or `inline` code (e.g. PR
+          # descriptions quoting future trigger heredoc content, or scenario
+          # test-case documentation) should NOT fire routing —
+          # `mention-routing-hygiene.md` (canonical) prescribes backticking
+          # handles in describing contexts, but the pre-#33 matcher ignored
+          # GitHub's autolink semantics. This strip aligns the matcher with
+          # rendered intent: if GitHub renders as inline code (no autolink),
+          # the router doesn't route.
+          #
+          # Implementation (ReDoS-safe — awk patterns line-anchored, sed
+          # bounded by [^`]*):
+          #   1. Awk state machine strips fenced blocks (```...```).
+          #   2. Sed strips inline code spans (`...`).
+          #
+          # $BODY is passed via env (`COMMENT_BODY` / `PR_BODY` / `REVIEW_BODY`
+          # set in the step env: block from `${{ github.event.*.body }}`),
+          # NOT inline-interpolated into the run: block — printf %s preserves
+          # arbitrary content safely.
+          BODY_CLEAN=$(printf '%s' "$BODY" | awk '
+            /^```/ { inside_fence = !inside_fence; next }
+            inside_fence { next }
+            { print }
+          ' | sed -E 's/`[^`]*`//g')
+
           TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
           [ -z "${PROJECT_CA_CERT:-}" ] && { echo "CA-cert var empty — check <PROJECT>_CA_CERT is set" >&2; exit 1; }
           printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
@@ -362,13 +388,16 @@ jobs:
             APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].app_name // empty')
             [ "$ACTOR" = "${APP_NAME}[bot]" ] && continue
 
-            # Fixed-string match instead of regex: $BODY is user-controlled
-            # (issue comment, PR body, review body). Regex interpretation
-            # risked catastrophic backtracking on crafted input (ReDoS) —
-            # filed as groundnuty/macf-actions#13. Semantically we want a
-            # literal substring check for "@<name>[bot]", which is exactly
-            # what `grep -F` does. Two `-e` terms cover the alternation.
-            if echo "$BODY" | grep -qF -e "@${AGENT_NAME}[bot]" -e "@${APP_NAME}[bot]"; then
+            # Fixed-string match instead of regex: $BODY_CLEAN is user-
+            # controlled (issue comment, PR body, review body) but with
+            # Markdown code-context (fenced blocks + inline code spans)
+            # already stripped per groundnuty/macf-actions#33. Regex
+            # interpretation risked catastrophic backtracking on crafted
+            # input (ReDoS) — filed as groundnuty/macf-actions#13.
+            # Semantically we want a literal substring check for
+            # "@<name>[bot]" outside code-context, which is grep -F on the
+            # cleaned body. Two `-e` terms cover the alternation.
+            if printf '%s' "$BODY_CLEAN" | grep -qF -e "@${AGENT_NAME}[bot]" -e "@${APP_NAME}[bot]"; then
               # Inline registry lookup: loop-driven, so `uses: composite`
               # isn't an option here (steps are static). Transform identical
               # to .github/actions/resolve-agent-endpoint and covered by
