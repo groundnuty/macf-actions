@@ -104,7 +104,7 @@ jobs:
             TARGET="$SESSION"
           fi
 
-          PROMPT="Please work on issue #${ISSUE_NUMBER}. Run: gh issue view ${ISSUE_NUMBER} --json title,body,labels,comments"
+          PROMPT="Please work on issue #${ISSUE_NUMBER}. Run: gh issue view ${ISSUE_NUMBER} --repo ${GITHUB_REPOSITORY} --json title,body,labels,comments"
 
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
