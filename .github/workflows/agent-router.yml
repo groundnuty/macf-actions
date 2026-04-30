@@ -603,6 +603,154 @@ jobs:
             fi
           done
 
+  # ─── ROUTE BY PR REVIEW STATE ───
+  # Notifies the PR author's channel-server when a reviewer submits an
+  # APPROVED or CHANGES_REQUESTED review on the PR. Closes the LGTM→merge
+  # handoff gap that pre-#39 routing didn't cover: route-by-mention only
+  # fires when the review body contains a routing-active @<author>[bot]
+  # mention; many reviewers approve without explicit @-mention (per
+  # mention-routing-hygiene §3 "addressing context" guidance). The
+  # structural state-change IS the notification — PR author wakes to
+  # merge (on approved) or fix (on changes_requested).
+  #
+  # Filter: action=submitted (excludes edited + dismissed); state in
+  # {approved, changes_requested} (commented + dismissed are out-of-scope
+  # at v3.3.0 per macf-actions#39 design Q3 disposition).
+  #
+  # Receiver-side schema (groundnuty/macf#293, v0.2.7+):
+  #   PrReviewStatePayloadSchema in @groundnuty/macf-core
+  route-by-pr-review-state:
+    needs: config
+    if: >
+      (github.event_name == 'pull_request_review') &&
+      (github.event.action == 'submitted') &&
+      (
+        github.event.review.state == 'approved' ||
+        github.event.review.state == 'changes_requested'
+      )
+    runs-on: ubuntu-latest
+    env:
+      AGENTS: ${{ needs.config.outputs.agents }}
+      PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
+      ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
+      ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      REVIEW_STATE: ${{ github.event.review.state }}
+      REVIEWER_LOGIN: ${{ github.event.review.user.login }}
+      REVIEW_URL: ${{ github.event.review.html_url }}
+      PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-runner
+
+      - name: Wait for Tailscale network
+        run: sleep 10
+
+      - name: Mint registry-read token
+        id: registry-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.MACF_ROUTING_APP_ID }}
+          private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Route PR review state to PR author (mTLS POST)
+        env:
+          REG_TOKEN: ${{ steps.registry-token.outputs.token }}
+          REG_PATH: ${{ inputs.registry-api-path }}
+        run: |
+          set -euo pipefail
+
+          # Resolve PR_AUTHOR (`<bot-name>[bot]`) → AGENT_NAME via
+          # the agents map's app_name field (same loop as route-by-
+          # ci-completion). PR author must be a registered agent —
+          # this skips review notifications for human-authored PRs
+          # since they have no channel-server to notify.
+          AGENT_NAME=""
+          for CANDIDATE in $(echo "$AGENTS" | jq -r 'keys[]'); do
+            APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$CANDIDATE" '.[$a].app_name // empty')
+            [ "$PR_AUTHOR" = "${APP_NAME}[bot]" ] && { AGENT_NAME="$CANDIDATE"; break; }
+          done
+          [ -z "$AGENT_NAME" ] && {
+            echo "PR #${PR_NUMBER} author '${PR_AUTHOR}' not a registered agent; skipping (review-state events only route to agent-authored PRs)";
+            exit 0;
+          }
+
+          # Reviewer identity is informational (rendered in the
+          # notification surface) but not required to be a registered
+          # agent. Reviewers can be any GitHub identity.
+
+          # Same inline-lookup justification as route-by-mention /
+          # route-by-ci-completion: loop-driven path uses the same
+          # transform as .github/actions/resolve-agent-endpoint
+          # (test/resolve-agent-endpoint-transform.sh).
+          AGENT_SEG=$(printf '%s' "$AGENT_NAME" | tr '[:lower:]-' '[:upper:]_')
+          VAR_NAME="${PROJECT_SEG}_AGENT_${AGENT_SEG}"
+
+          set +e
+          ENTRY=$(GH_TOKEN="$REG_TOKEN" gh api "${REG_PATH}/actions/variables/${VAR_NAME}" --jq '.value' 2>/dev/null)
+          API_RC=$?
+          set -e
+          if [ "$API_RC" -ne 0 ] || [ -z "$ENTRY" ]; then
+            echo "Registry miss for ${AGENT_NAME} (${VAR_NAME}); skipping pr_review_state route"
+            exit 0
+          fi
+          HOST=$(echo "$ENTRY" | jq -r '.host // empty')
+          PORT=$(echo "$ENTRY" | jq -r '.port // empty')
+          if [ -z "$HOST" ] || [ -z "$PORT" ]; then
+            echo "Registry entry ${VAR_NAME} missing host or port; skipping" >&2
+            exit 0
+          fi
+
+          TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
+          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "CA-cert var empty — check <PROJECT>_CA_CERT is set" >&2; exit 1; }
+          printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
+          echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
+          echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
+          chmod 600 "$TMPDIR/k.pem"
+
+          # Build PrReviewStatePayloadSchema-conformant payload (per
+          # @groundnuty/macf-core v0.2.7+; receivers on older versions
+          # HTTP-400-reject without harm to other notification types —
+          # backward-compat protected by the schema's wider acceptance
+          # path on NotifyPayloadSchema).
+          PAYLOAD=$(jq -n \
+            --arg type "pr_review_state" \
+            --arg review_state "$REVIEW_STATE" \
+            --arg reviewer_login "$REVIEWER_LOGIN" \
+            --argjson pr_number "$PR_NUMBER" \
+            --arg pr_url "$PR_URL" \
+            --arg review_url "$REVIEW_URL" \
+            '{type: $type, review_state: $review_state, reviewer_login: $reviewer_login, pr_number: $pr_number, pr_url: $pr_url, review_url: $review_url}')
+
+          set +e
+          HTTP_CODE=$(curl --silent --show-error \
+            --cacert "$TMPDIR/ca.pem" --cert "$TMPDIR/c.pem" --key "$TMPDIR/k.pem" \
+            --max-time 30 -X POST "https://${HOST}:${PORT}/notify" \
+            -H 'Content-Type: application/json' -d "$PAYLOAD" \
+            -o "$TMPDIR/r.txt" -w '%{http_code}')
+          CURL_RC=$?
+          set -e
+
+          if [ "$CURL_RC" -eq 0 ] && [ "$HTTP_CODE" = "200" ]; then
+            echo "Routed pr_review_state (${REVIEW_STATE}) on PR #${PR_NUMBER} to ${AGENT_NAME} via mTLS"
+          elif [ "$HTTP_CODE" = "400" ]; then
+            # Receiver-version-skew: receiver is on @groundnuty/macf-core
+            # < v0.2.7 (no pr_review_state in NotifyTypeSchema). Log +
+            # continue; non-fatal (the gh-driven event is informational,
+            # not a state-mutating step like /sign).
+            echo "Agent ${AGENT_NAME} returned HTTP 400 (likely macf-core < v0.2.7 — pre-pr_review_state schema); skipping"
+          else
+            echo "Agent ${AGENT_NAME} unreachable via mTLS for PR #${PR_NUMBER} review (rc=$CURL_RC HTTP=$HTTP_CODE); skipping (review-state events don't mark agent-offline)"
+          fi
+
   # ─── LABEL CLEANUP ON CLOSE ───
   cleanup-labels:
     if: >
