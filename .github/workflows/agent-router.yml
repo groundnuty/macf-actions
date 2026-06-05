@@ -55,6 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
+      # macf#444 Option D: route-run id for the turn-ack correlation marker.
+      ROUTE_RUN_ID: ${{ github.run_id }}
       AGENTS: ${{ needs.config.outputs.agents }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -104,7 +106,10 @@ jobs:
             TARGET="$SESSION"
           fi
 
-          PROMPT="Please work on issue #${ISSUE_NUMBER}. Run: gh issue view ${ISSUE_NUMBER} --repo ${GITHUB_REPOSITORY} --json title,body,labels,comments"
+          # macf#444 Option D: trailing route-correlation marker (run_id:agent)
+          # for the turn-ack receipt join. Single-quote-free → survives the
+          # single-quoted ssh/send-keys arg passing; the agent ignores the tag.
+          PROMPT="Please work on issue #${ISSUE_NUMBER}. Run: gh issue view ${ISSUE_NUMBER} --repo ${GITHUB_REPOSITORY} --json title,body,labels,comments [macf-route:${ROUTE_RUN_ID}:${LABEL}]"
 
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
@@ -185,6 +190,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
+      # macf#444 Option D: route-run id for the turn-ack correlation marker.
+      ROUTE_RUN_ID: ${{ github.run_id }}
       AGENTS: ${{ needs.config.outputs.agents }}
     steps:
       - name: Connect to Tailscale
@@ -261,7 +268,8 @@ jobs:
                 TARGET="$SESSION"
               fi
 
-              MENTION_PROMPT="You were mentioned in ${REF}. Please check and respond: gh issue view ${VIEW_NUM} --repo ${REPO} --json title,body,comments"
+              # macf#444 Option D: trailing route-correlation marker (run_id:agent).
+              MENTION_PROMPT="You were mentioned in ${REF}. Please check and respond: gh issue view ${VIEW_NUM} --repo ${REPO} --json title,body,comments [macf-route:${ROUTE_RUN_ID}:${AGENT_NAME}]"
 
               mkdir -p ~/.ssh && chmod 700 ~/.ssh
               echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
@@ -338,6 +346,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
+      # macf#444 Option D: route-run id for the turn-ack correlation marker.
+      ROUTE_RUN_ID: ${{ github.run_id }}
       AGENTS: ${{ needs.config.outputs.agents }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CHECK_SUITE_ID: ${{ github.event.check_suite.id }}
@@ -466,6 +476,9 @@ jobs:
             # quoted args; a title containing `'` would break remote
             # parse. Strip single quotes defensively before passing.
             SAFE_PROMPT=$(echo "$PROMPT" | tr -d "'")
+            # macf#444 Option D: append the route-correlation marker AFTER the
+            # strip (marker is single-quote-free, so order is immaterial).
+            SAFE_PROMPT="${SAFE_PROMPT} [macf-route:${ROUTE_RUN_ID}:${AGENT_NAME}]"
 
             # Probe liveness with retry (groundnuty/macf#437 cause 2): alive /
             # absent / unknown; only genuine absent skips, unknown still attempts
@@ -532,6 +545,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
+      # macf#444 Option D: route-run id for the turn-ack correlation marker.
+      ROUTE_RUN_ID: ${{ github.run_id }}
       AGENTS: ${{ needs.config.outputs.agents }}
       REPO: ${{ github.repository }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -617,6 +632,9 @@ jobs:
           # containing `'` would break the remote parse. Strip defensively
           # (same caveat as route-by-ci-completion).
           SAFE_PROMPT=$(echo "$PROMPT" | tr -d "'")
+          # macf#444 Option D: append the route-correlation marker AFTER the
+          # strip (marker is single-quote-free, so order is immaterial).
+          SAFE_PROMPT="${SAFE_PROMPT} [macf-route:${ROUTE_RUN_ID}:${AGENT_NAME}]"
 
           # Probe liveness with retry (groundnuty/macf#437 cause 2): alive /
           # absent / unknown; only genuine absent skips, unknown still attempts
