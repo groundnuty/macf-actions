@@ -125,33 +125,54 @@ jobs:
           # body, comment body, etc.), switch to `bash -s` + heredoc-stdin
           # or escape single quotes before passing — otherwise a prompt
           # containing `'` would break the remote parse.
-          HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
-          if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-            -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-            "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null && test -x '${HELPER}'" 2>/dev/null; then
-            # Helper path: one SSH invocation that runs the canonical script
-            # with the target and prompt as args. Single source of truth.
-            if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+          # Probe liveness with retry (groundnuty/macf#437 cause 2) — see the
+          # alive/absent/unknown rationale. For label-routing, a GENUINE absent
+          # marks the issue agent-offline (picked up on the agent's next start);
+          # on unknown (transient probe error) we attempt delivery rather than
+          # mislabel a live agent offline. (SSH stderr is `2>/dev/null`'d, so PROBE is exactly `rc=N`.)
+          SESSION_STATE=unknown
+          for probe_attempt in 1 2 3; do
+            # `|| true`: an ssh transport failure (exit 255, empty stdout) must NOT
+            # abort the step under `set -euo pipefail` — leave PROBE empty so it
+            # falls to the retry arm (groundnuty/macf#437 PR #44 review blocker).
+            PROBE=$(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
               -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "'${HELPER}' '${TARGET}' '${PROMPT}'"; then
-              echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via helper (target=${TARGET})"
-            else
-              echo "Agent ${LABEL} helper invocation failed"
-              gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "agent-offline"
-            fi
-          elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-            -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-            "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
-              && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
-              && ${TMUX_BIN} send-keys -t ${TARGET} '${PROMPT}' Enter \
-              && sleep 1 \
-              && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
-            echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via inline (target=${TARGET})"
-          else
-            echo "Agent ${LABEL} is offline or unreachable"
+              "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null) || true
+            # rc=0 alive; rc=1 genuine no-session (absent); anything else (empty=
+            # ssh-fail, rc=127=tmux-missing) → unknown → retry → attempt.
+            case "$PROBE" in
+              rc=0) SESSION_STATE=alive; break ;;
+              rc=1) SESSION_STATE=absent; break ;;
+              *)    if [ "$probe_attempt" -lt 3 ]; then sleep 3; fi ;;
+            esac
+          done
+
+          if [ "$SESSION_STATE" = "absent" ]; then
+            echo "Agent ${LABEL} session not found (offline); marking agent-offline"
             gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "agent-offline"
             gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
               --body "Agent \`${APP_NAME}[bot]\` is offline. Issue will be picked up when the agent starts."
+          else
+            HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
+            HELPER_OK=no
+            if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" "test -x '${HELPER}'" 2>/dev/null; then
+              HELPER_OK=yes
+            fi
+            if [ "$HELPER_OK" = "yes" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+              "'${HELPER}' '${TARGET}' '${PROMPT}'"; then
+              echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via helper (target=${TARGET}, session=${SESSION_STATE})"
+            elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+              "${TMUX_BIN} send-keys -t ${TARGET} C-u \
+                && ${TMUX_BIN} send-keys -t ${TARGET} '${PROMPT}' Enter \
+                && sleep 1 \
+                && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
+              echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via inline (target=${TARGET}, session=${SESSION_STATE})"
+            else
+              echo "Agent ${LABEL} delivery FAILED after probe=${SESSION_STATE} (attempted, not silently offline-skipped)"
+            fi
           fi
 
   # ─── @MENTION ROUTING ───
@@ -249,27 +270,51 @@ jobs:
               # Helper invocation path (see route-by-label for rationale).
               # Falls back to inline when workspace_dir is unset or the
               # helper isn't executable at that path.
-              HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
-              if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-                -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null && test -x '${HELPER}'" 2>/dev/null; then
-                if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+              # Probe liveness with retry (groundnuty/macf#437 cause 2): classify
+              # alive / absent / unknown; only a genuine "no session" (absent)
+              # skips. On unknown (the probe itself errored) we still ATTEMPT
+              # delivery — a duplicate ping is recoverable; a dropped one strands
+              # a PR. (SSH stderr is `2>/dev/null`'d, so PROBE is exactly `rc=N`.)
+              SESSION_STATE=unknown
+              for probe_attempt in 1 2 3; do
+                # `|| true`: an ssh transport failure (exit 255, empty stdout) must
+                # NOT abort the step under `set -euo pipefail` — leave PROBE empty
+                # so it falls to the retry arm (groundnuty/macf#437 PR #44 review).
+                PROBE=$(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+                  -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+                  "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null) || true
+                # rc=0 alive; rc=1 genuine no-session (absent); anything else
+                # (empty=ssh-fail, rc=127=tmux-missing) → unknown → retry → attempt.
+                case "$PROBE" in
+                  rc=0) SESSION_STATE=alive; break ;;
+                  rc=1) SESSION_STATE=absent; break ;;
+                  *)    if [ "$probe_attempt" -lt 3 ]; then sleep 3; fi ;;
+                esac
+              done
+
+              if [ "$SESSION_STATE" = "absent" ]; then
+                echo "Agent ${AGENT_NAME} session not found (offline), skipping"
+              else
+                HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
+                HELPER_OK=no
+                if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+                  -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" "test -x '${HELPER}'" 2>/dev/null; then
+                  HELPER_OK=yes
+                fi
+                if [ "$HELPER_OK" = "yes" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
                   -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
                   "'${HELPER}' '${TARGET}' '${MENTION_PROMPT}'"; then
-                  echo "Routed mention to ${AGENT_NAME} via helper (target=${TARGET})"
+                  echo "Routed mention to ${AGENT_NAME} via helper (target=${TARGET}, session=${SESSION_STATE})"
+                elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+                  -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+                  "${TMUX_BIN} send-keys -t ${TARGET} C-u \
+                    && ${TMUX_BIN} send-keys -t ${TARGET} '${MENTION_PROMPT}' Enter \
+                    && sleep 1 \
+                    && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
+                  echo "Routed mention to ${AGENT_NAME} via inline (target=${TARGET}, session=${SESSION_STATE})"
                 else
-                  echo "Agent ${AGENT_NAME} helper invocation failed"
+                  echo "Agent ${AGENT_NAME} delivery FAILED after probe=${SESSION_STATE} (attempted, not silently offline-skipped)"
                 fi
-              elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-                -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
-                  && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
-                  && ${TMUX_BIN} send-keys -t ${TARGET} '${MENTION_PROMPT}' Enter \
-                  && sleep 1 \
-                  && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
-                echo "Routed mention to ${AGENT_NAME} via inline (target=${TARGET})"
-              else
-                echo "Agent ${AGENT_NAME} is offline, skipping"
               fi
             fi
           done
@@ -422,27 +467,49 @@ jobs:
             # parse. Strip single quotes defensively before passing.
             SAFE_PROMPT=$(echo "$PROMPT" | tr -d "'")
 
-            HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
-            if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null && test -x '${HELPER}'" 2>/dev/null; then
-              if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+            # Probe liveness with retry (groundnuty/macf#437 cause 2): alive /
+            # absent / unknown; only genuine absent skips, unknown still attempts
+            # (a dropped CI-completion ping strands an agent-authored PR).
+            SESSION_STATE=unknown
+            for probe_attempt in 1 2 3; do
+              # `|| true`: an ssh transport failure (exit 255, empty stdout) must
+              # NOT abort the step under `set -euo pipefail` — leave PROBE empty so
+              # it falls to the retry arm (groundnuty/macf#437 PR #44 review).
+              PROBE=$(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+                -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+                "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null) || true
+              # rc=0 alive; rc=1 genuine no-session (absent); anything else
+              # (empty=ssh-fail, rc=127=tmux-missing) → unknown → retry → attempt.
+              case "$PROBE" in
+                rc=0) SESSION_STATE=alive; break ;;
+                rc=1) SESSION_STATE=absent; break ;;
+                *)    if [ "$probe_attempt" -lt 3 ]; then sleep 3; fi ;;
+              esac
+            done
+
+            if [ "$SESSION_STATE" = "absent" ]; then
+              echo "Agent ${AGENT_NAME} session not found (offline), skipping CI-completion for PR #${PR_NUMBER}"
+            else
+              HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
+              HELPER_OK=no
+              if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+                -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" "test -x '${HELPER}'" 2>/dev/null; then
+                HELPER_OK=yes
+              fi
+              if [ "$HELPER_OK" = "yes" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
                 -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
                 "'${HELPER}' '${TARGET}' '${SAFE_PROMPT}'"; then
-                echo "Routed CI completion for PR #${PR_NUMBER} to ${AGENT_NAME} via helper (target=${TARGET})"
+                echo "Routed CI completion for PR #${PR_NUMBER} to ${AGENT_NAME} via helper (target=${TARGET}, session=${SESSION_STATE})"
+              elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+                -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+                "${TMUX_BIN} send-keys -t ${TARGET} C-u \
+                  && ${TMUX_BIN} send-keys -t ${TARGET} '${SAFE_PROMPT}' Enter \
+                  && sleep 1 \
+                  && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
+                echo "Routed CI completion for PR #${PR_NUMBER} to ${AGENT_NAME} via inline (target=${TARGET}, session=${SESSION_STATE})"
               else
-                echo "Agent ${AGENT_NAME} helper invocation failed for PR #${PR_NUMBER}"
+                echo "Agent ${AGENT_NAME} delivery FAILED for PR #${PR_NUMBER} after probe=${SESSION_STATE} (attempted, not silently offline-skipped)"
               fi
-            elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
-                && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
-                && ${TMUX_BIN} send-keys -t ${TARGET} '${SAFE_PROMPT}' Enter \
-                && sleep 1 \
-                && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
-              echo "Routed CI completion for PR #${PR_NUMBER} to ${AGENT_NAME} via inline (target=${TARGET})"
-            else
-              echo "Agent ${AGENT_NAME} is offline, skipping CI-completion notification for PR #${PR_NUMBER}"
             fi
           done
 
@@ -551,27 +618,49 @@ jobs:
           # (same caveat as route-by-ci-completion).
           SAFE_PROMPT=$(echo "$PROMPT" | tr -d "'")
 
-          HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
-          if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-            -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-            "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null && test -x '${HELPER}'" 2>/dev/null; then
-            if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+          # Probe liveness with retry (groundnuty/macf#437 cause 2): alive /
+          # absent / unknown; only genuine absent skips, unknown still attempts
+          # (a dropped approve/changes-requested ping strands the PR author).
+          SESSION_STATE=unknown
+          for probe_attempt in 1 2 3; do
+            # `|| true`: an ssh transport failure (exit 255, empty stdout) must NOT
+            # abort the step under `set -euo pipefail` — leave PROBE empty so it
+            # falls to the retry arm (groundnuty/macf#437 PR #44 review blocker).
+            PROBE=$(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+              "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null) || true
+            # rc=0 alive; rc=1 genuine no-session (absent); anything else (empty=
+            # ssh-fail, rc=127=tmux-missing) → unknown → retry → attempt.
+            case "$PROBE" in
+              rc=0) SESSION_STATE=alive; break ;;
+              rc=1) SESSION_STATE=absent; break ;;
+              *)    if [ "$probe_attempt" -lt 3 ]; then sleep 3; fi ;;
+            esac
+          done
+
+          if [ "$SESSION_STATE" = "absent" ]; then
+            echo "Agent ${AGENT_NAME} session not found (offline), skipping review-state for PR #${PR_NUMBER}"
+          else
+            HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
+            HELPER_OK=no
+            if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" "test -x '${HELPER}'" 2>/dev/null; then
+              HELPER_OK=yes
+            fi
+            if [ "$HELPER_OK" = "yes" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
               -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
               "'${HELPER}' '${TARGET}' '${SAFE_PROMPT}'"; then
-              echo "Routed review-state (${REVIEW_STATE}) for PR #${PR_NUMBER} to ${AGENT_NAME} via helper (target=${TARGET})"
+              echo "Routed review-state (${REVIEW_STATE}) for PR #${PR_NUMBER} to ${AGENT_NAME} via helper (target=${TARGET}, session=${SESSION_STATE})"
+            elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+              "${TMUX_BIN} send-keys -t ${TARGET} C-u \
+                && ${TMUX_BIN} send-keys -t ${TARGET} '${SAFE_PROMPT}' Enter \
+                && sleep 1 \
+                && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
+              echo "Routed review-state (${REVIEW_STATE}) for PR #${PR_NUMBER} to ${AGENT_NAME} via inline (target=${TARGET}, session=${SESSION_STATE})"
             else
-              echo "Agent ${AGENT_NAME} helper invocation failed for PR #${PR_NUMBER}"
+              echo "Agent ${AGENT_NAME} delivery FAILED for PR #${PR_NUMBER} review after probe=${SESSION_STATE} (attempted, not silently offline-skipped)"
             fi
-          elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
-            -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-            "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
-              && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
-              && ${TMUX_BIN} send-keys -t ${TARGET} '${SAFE_PROMPT}' Enter \
-              && sleep 1 \
-              && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
-            echo "Routed review-state (${REVIEW_STATE}) for PR #${PR_NUMBER} to ${AGENT_NAME} via inline (target=${TARGET})"
-          else
-            echo "Agent ${AGENT_NAME} is offline, skipping review-state notification for PR #${PR_NUMBER}"
           fi
 
   # ─── LABEL CLEANUP ON CLOSE ───
