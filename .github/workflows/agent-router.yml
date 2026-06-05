@@ -446,6 +446,134 @@ jobs:
             fi
           done
 
+  # ─── ROUTE PR REVIEW STATE TO THE PR AUTHOR (macf#432 backport) ───
+  # An approve / changes-requested review notifies the PR author
+  # (implementer) in their tmux session, so a `gh pr review` reaches the
+  # author without a manual @mention. Backported to v1.3.2 from the v3.3.0
+  # `route-by-pr-review-state` feature, but REIMPLEMENTED on the v1.x
+  # SSH/tmux primitive (the same one route-by-ci-completion + route-by-
+  # mention use) — NOT the v3 mTLS path. The v1.x contract is preserved:
+  # same 3 secrets, no new inputs. Everything is read from the
+  # pull_request_review event payload (PR + review objects) — no `gh api`
+  # calls, so no caller `permissions:` beyond the v1.3.1 set is needed.
+  route-by-pr-review-state:
+    needs: config
+    if: >
+      (github.event_name == 'pull_request_review') &&
+      (github.event.review.state == 'approved' ||
+       github.event.review.state == 'changes_requested')
+    runs-on: ubuntu-latest
+    env:
+      AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
+      AGENTS: ${{ needs.config.outputs.agents }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      PR_STATE: ${{ github.event.pull_request.state }}
+      PR_DRAFT: ${{ github.event.pull_request.draft }}
+      REVIEW_STATE: ${{ github.event.review.state }}
+      REVIEWER: ${{ github.event.review.user.login }}
+      REVIEW_URL: ${{ github.event.review.html_url }}
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-runner
+
+      - name: Wait for Tailscale network
+        run: sleep 10
+
+      - name: Route PR review state to the PR author
+        run: |
+          set -euo pipefail
+
+          # A review can land on a draft or non-open PR; skip both (no
+          # actionable next step for the author).
+          if [ "$PR_STATE" != "open" ]; then
+            echo "PR #${PR_NUMBER} state=${PR_STATE}, skipping"
+            exit 0
+          fi
+          if [ "$PR_DRAFT" = "true" ]; then
+            echo "PR #${PR_NUMBER} is a draft, skipping"
+            exit 0
+          fi
+
+          # Author-to-agent lookup: the PR author (implementer) must be a
+          # registered agent. Human / dependabot-authored PRs no-op cleanly
+          # (no channel-server to notify) — same guard as route-by-ci-completion.
+          AGENT_NAME=""
+          for CANDIDATE in $(echo "$AGENTS" | jq -r 'keys[]'); do
+            APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$CANDIDATE" '.[$a].app_name // empty')
+            if [ "$PR_AUTHOR" = "${APP_NAME}[bot]" ]; then
+              AGENT_NAME="$CANDIDATE"
+              break
+            fi
+          done
+
+          if [ -z "$AGENT_NAME" ]; then
+            echo "PR #${PR_NUMBER} author '${PR_AUTHOR}' is not a registered agent, skipping"
+            exit 0
+          fi
+
+          # Build the notification prompt per review state. Both approved
+          # and changes_requested route — the author needs the changes-
+          # requested ping as much as the approve.
+          PR_URL="https://github.com/${REPO}/pull/${PR_NUMBER}"
+          if [ "$REVIEW_STATE" = "approved" ]; then
+            PROMPT="PR #${PR_NUMBER} (\"${PR_TITLE}\"): review APPROVED by ${REVIEWER}. ${REVIEW_URL}. Next: merge if you are the author (after the LGTM gate is satisfied)."
+          else
+            PROMPT="PR #${PR_NUMBER} (\"${PR_TITLE}\"): CHANGES REQUESTED by ${REVIEWER}. ${REVIEW_URL}. Next: address the feedback + push to the same branch."
+          fi
+
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
+          chmod 600 ~/.ssh/id_agent
+
+          HOST=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].host')
+          SESSION=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_session')
+          WINDOW=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_window // empty')
+          SSH_USER=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].ssh_user')
+          TMUX_BIN=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].tmux_bin // "tmux"')
+          WORKSPACE_DIR=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].workspace_dir // empty')
+
+          if [ -n "$WINDOW" ]; then
+            TARGET="${SESSION}:${WINDOW}"
+          else
+            TARGET="$SESSION"
+          fi
+
+          # PR_TITLE is user-controlled (the PR-authoring bot chose it).
+          # The helper/inline paths use single-quoted remote args; a title
+          # containing `'` would break the remote parse. Strip defensively
+          # (same caveat as route-by-ci-completion).
+          SAFE_PROMPT=$(echo "$PROMPT" | tr -d "'")
+
+          HELPER="${WORKSPACE_DIR}/.claude/scripts/tmux-send-to-claude.sh"
+          if [ -n "$WORKSPACE_DIR" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+            -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+            "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null && test -x '${HELPER}'" 2>/dev/null; then
+            if ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+              "'${HELPER}' '${TARGET}' '${SAFE_PROMPT}'"; then
+              echo "Routed review-state (${REVIEW_STATE}) for PR #${PR_NUMBER} to ${AGENT_NAME} via helper (target=${TARGET})"
+            else
+              echo "Agent ${AGENT_NAME} helper invocation failed for PR #${PR_NUMBER}"
+            fi
+          elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
+            -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
+            "${TMUX_BIN} has-session -t ${SESSION} 2>/dev/null \
+              && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
+              && ${TMUX_BIN} send-keys -t ${TARGET} '${SAFE_PROMPT}' Enter \
+              && sleep 1 \
+              && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
+            echo "Routed review-state (${REVIEW_STATE}) for PR #${PR_NUMBER} to ${AGENT_NAME} via inline (target=${TARGET})"
+          else
+            echo "Agent ${AGENT_NAME} is offline, skipping review-state notification for PR #${PR_NUMBER}"
+          fi
+
   # ─── LABEL CLEANUP ON CLOSE ───
   cleanup-labels:
     if: >
