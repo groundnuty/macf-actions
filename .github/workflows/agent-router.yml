@@ -129,16 +129,21 @@ jobs:
           # alive/absent/unknown rationale. For label-routing, a GENUINE absent
           # marks the issue agent-offline (picked up on the agent's next start);
           # on unknown (transient probe error) we attempt delivery rather than
-          # mislabel a live agent offline. `*rc=N*` tolerates a leading SSH warning.
+          # mislabel a live agent offline. (SSH stderr is `2>/dev/null`'d, so PROBE is exactly `rc=N`.)
           SESSION_STATE=unknown
           for probe_attempt in 1 2 3; do
+            # `|| true`: an ssh transport failure (exit 255, empty stdout) must NOT
+            # abort the step under `set -euo pipefail` — leave PROBE empty so it
+            # falls to the retry arm (groundnuty/macf#437 PR #44 review blocker).
             PROBE=$(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
               -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null)
+              "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null) || true
+            # rc=0 alive; rc=1 genuine no-session (absent); anything else (empty=
+            # ssh-fail, rc=127=tmux-missing) → unknown → retry → attempt.
             case "$PROBE" in
-              *rc=0*) SESSION_STATE=alive; break ;;
-              *rc=*)  SESSION_STATE=absent; break ;;
-              *)      sleep 3 ;;
+              rc=0) SESSION_STATE=alive; break ;;
+              rc=1) SESSION_STATE=absent; break ;;
+              *)    if [ "$probe_attempt" -lt 3 ]; then sleep 3; fi ;;
             esac
           done
 
@@ -166,7 +171,7 @@ jobs:
                 && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
               echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via inline (target=${TARGET}, session=${SESSION_STATE})"
             else
-              echo "Agent ${LABEL} delivery FAILED after probe=${SESSION_STATE} (attempted; not marking agent-offline on a non-absent probe)"
+              echo "Agent ${LABEL} delivery FAILED after probe=${SESSION_STATE} (attempted, not silently offline-skipped)"
             fi
           fi
 
@@ -269,16 +274,21 @@ jobs:
               # alive / absent / unknown; only a genuine "no session" (absent)
               # skips. On unknown (the probe itself errored) we still ATTEMPT
               # delivery — a duplicate ping is recoverable; a dropped one strands
-              # a PR. `*rc=N*` tolerates a leading SSH warning in the probe output.
+              # a PR. (SSH stderr is `2>/dev/null`'d, so PROBE is exactly `rc=N`.)
               SESSION_STATE=unknown
               for probe_attempt in 1 2 3; do
+                # `|| true`: an ssh transport failure (exit 255, empty stdout) must
+                # NOT abort the step under `set -euo pipefail` — leave PROBE empty
+                # so it falls to the retry arm (groundnuty/macf#437 PR #44 review).
                 PROBE=$(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
                   -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                  "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null)
+                  "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null) || true
+                # rc=0 alive; rc=1 genuine no-session (absent); anything else
+                # (empty=ssh-fail, rc=127=tmux-missing) → unknown → retry → attempt.
                 case "$PROBE" in
-                  *rc=0*) SESSION_STATE=alive; break ;;
-                  *rc=*)  SESSION_STATE=absent; break ;;
-                  *)      sleep 3 ;;
+                  rc=0) SESSION_STATE=alive; break ;;
+                  rc=1) SESSION_STATE=absent; break ;;
+                  *)    if [ "$probe_attempt" -lt 3 ]; then sleep 3; fi ;;
                 esac
               done
 
@@ -462,13 +472,18 @@ jobs:
             # (a dropped CI-completion ping strands an agent-authored PR).
             SESSION_STATE=unknown
             for probe_attempt in 1 2 3; do
+              # `|| true`: an ssh transport failure (exit 255, empty stdout) must
+              # NOT abort the step under `set -euo pipefail` — leave PROBE empty so
+              # it falls to the retry arm (groundnuty/macf#437 PR #44 review).
               PROBE=$(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
                 -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null)
+                "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null) || true
+              # rc=0 alive; rc=1 genuine no-session (absent); anything else
+              # (empty=ssh-fail, rc=127=tmux-missing) → unknown → retry → attempt.
               case "$PROBE" in
-                *rc=0*) SESSION_STATE=alive; break ;;
-                *rc=*)  SESSION_STATE=absent; break ;;
-                *)      sleep 3 ;;
+                rc=0) SESSION_STATE=alive; break ;;
+                rc=1) SESSION_STATE=absent; break ;;
+                *)    if [ "$probe_attempt" -lt 3 ]; then sleep 3; fi ;;
               esac
             done
 
@@ -608,13 +623,18 @@ jobs:
           # (a dropped approve/changes-requested ping strands the PR author).
           SESSION_STATE=unknown
           for probe_attempt in 1 2 3; do
+            # `|| true`: an ssh transport failure (exit 255, empty stdout) must NOT
+            # abort the step under `set -euo pipefail` — leave PROBE empty so it
+            # falls to the retry arm (groundnuty/macf#437 PR #44 review blocker).
             PROBE=$(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
               -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null)
+              "${TMUX_BIN} has-session -t ${SESSION} >/dev/null 2>&1; echo rc=\$?" 2>/dev/null) || true
+            # rc=0 alive; rc=1 genuine no-session (absent); anything else (empty=
+            # ssh-fail, rc=127=tmux-missing) → unknown → retry → attempt.
             case "$PROBE" in
-              *rc=0*) SESSION_STATE=alive; break ;;
-              *rc=*)  SESSION_STATE=absent; break ;;
-              *)      sleep 3 ;;
+              rc=0) SESSION_STATE=alive; break ;;
+              rc=1) SESSION_STATE=absent; break ;;
+              *)    if [ "$probe_attempt" -lt 3 ]; then sleep 3; fi ;;
             esac
           done
 
