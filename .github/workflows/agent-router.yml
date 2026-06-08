@@ -107,9 +107,17 @@ jobs:
           fi
 
           # macf#444 Option D: trailing route-correlation marker (run_id:agent)
-          # for the turn-ack receipt join. Single-quote-free → survives the
-          # single-quoted ssh/send-keys arg passing; the agent ignores the tag.
+          # for the turn-ack receipt join; the agent ignores the tag.
           PROMPT="Please work on issue #${ISSUE_NUMBER}. Run: gh issue view ${ISSUE_NUMBER} --repo ${GITHUB_REPOSITORY} --json title,body,labels,comments [macf-route:${ROUTE_RUN_ID}:${LABEL}]"
+
+          # macf-actions#47: send the prompt as opaque base64 DATA — decoded into a
+          # quoted var on the remote, NEVER interpolated into the remote shell /
+          # send-keys string. base64 is [A-Za-z0-9+/=] (shell-inert), so the value
+          # carries event-derived text (here the LABEL; PR_TITLE on other jobs)
+          # with zero quoting/escaping discipline. Uniform across all send paths so
+          # a future free-text addition can't reopen the class. Decode = `base64 -d`
+          # (GNU; the substrate remote is Linux).
+          PROMPT_B64=$(printf '%s' "$PROMPT" | base64 | tr -d '\n')
 
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
@@ -122,14 +130,11 @@ jobs:
           # is kept in lock-step with the helper contents — keep the two
           # in sync. See groundnuty/macf#71.
           #
-          # Shell-quoting caveat: the helper invocation passes $TARGET and
-          # $PROMPT via single-quoted args inside the remote ssh command.
-          # Current PROMPT contents interpolate only issue numbers and
-          # GitHub-supplied REF strings (all safe — no single quotes).
-          # If PROMPT ever grows to include user-controlled text (issue
-          # body, comment body, etc.), switch to `bash -s` + heredoc-stdin
-          # or escape single quotes before passing — otherwise a prompt
-          # containing `'` would break the remote parse.
+          # The prompt rides as $PROMPT_B64 (base64, computed above) and is
+          # decoded into a quoted remote var (`PROMPT`) before being handed to
+          # the helper / send-keys as argv — it is NEVER interpolated into the
+          # remote command string (macf-actions#47). $TARGET / $HELPER are
+          # operator-config values (agent-config.json), not event-derived.
           # Probe liveness with retry (groundnuty/macf#437 cause 2) — see the
           # alive/absent/unknown rationale. For label-routing, a GENUINE absent
           # marks the issue agent-offline (picked up on the agent's next start);
@@ -166,12 +171,13 @@ jobs:
             fi
             if [ "$HELPER_OK" = "yes" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
               -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "'${HELPER}' '${TARGET}' '${PROMPT}'"; then
+              "PROMPT=\$(printf %s '${PROMPT_B64}' | base64 -d) && '${HELPER}' '${TARGET}' \"\$PROMPT\""; then
               echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via helper (target=${TARGET}, session=${SESSION_STATE})"
             elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
               -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "${TMUX_BIN} send-keys -t ${TARGET} C-u \
-                && ${TMUX_BIN} send-keys -t ${TARGET} '${PROMPT}' Enter \
+              "PROMPT=\$(printf %s '${PROMPT_B64}' | base64 -d) \
+                && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
+                && ${TMUX_BIN} send-keys -t ${TARGET} \"\$PROMPT\" Enter \
                 && sleep 1 \
                 && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
               echo "Routed issue #${ISSUE_NUMBER} to ${LABEL} via inline (target=${TARGET}, session=${SESSION_STATE})"
@@ -270,6 +276,10 @@ jobs:
 
               # macf#444 Option D: trailing route-correlation marker (run_id:agent).
               MENTION_PROMPT="You were mentioned in ${REF}. Please check and respond: gh issue view ${VIEW_NUM} --repo ${REPO} --json title,body,comments [macf-route:${ROUTE_RUN_ID}:${AGENT_NAME}]"
+              # macf-actions#47: send the prompt as opaque base64 DATA, decoded into
+              # a quoted remote var — never interpolated into the remote command
+              # (see route-by-label for the full rationale). ${REF} is event-derived.
+              MENTION_PROMPT_B64=$(printf '%s' "$MENTION_PROMPT" | base64 | tr -d '\n')
 
               mkdir -p ~/.ssh && chmod 700 ~/.ssh
               echo "$AGENT_SSH_KEY" > ~/.ssh/id_agent
@@ -311,12 +321,13 @@ jobs:
                 fi
                 if [ "$HELPER_OK" = "yes" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
                   -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                  "'${HELPER}' '${TARGET}' '${MENTION_PROMPT}'"; then
+                  "PROMPT=\$(printf %s '${MENTION_PROMPT_B64}' | base64 -d) && '${HELPER}' '${TARGET}' \"\$PROMPT\""; then
                   echo "Routed mention to ${AGENT_NAME} via helper (target=${TARGET}, session=${SESSION_STATE})"
                 elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
                   -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                  "${TMUX_BIN} send-keys -t ${TARGET} C-u \
-                    && ${TMUX_BIN} send-keys -t ${TARGET} '${MENTION_PROMPT}' Enter \
+                  "PROMPT=\$(printf %s '${MENTION_PROMPT_B64}' | base64 -d) \
+                    && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
+                    && ${TMUX_BIN} send-keys -t ${TARGET} \"\$PROMPT\" Enter \
                     && sleep 1 \
                     && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
                   echo "Routed mention to ${AGENT_NAME} via inline (target=${TARGET}, session=${SESSION_STATE})"
@@ -471,14 +482,14 @@ jobs:
               TARGET="$SESSION"
             fi
 
-            # Shell-quoting caveat: PR_TITLE is user-controlled (the
-            # PR-authoring bot chose it). The helper path uses single-
-            # quoted args; a title containing `'` would break remote
-            # parse. Strip single quotes defensively before passing.
-            SAFE_PROMPT=$(echo "$PROMPT" | tr -d "'")
-            # macf#444 Option D: append the route-correlation marker AFTER the
-            # strip (marker is single-quote-free, so order is immaterial).
-            SAFE_PROMPT="${SAFE_PROMPT} [macf-route:${ROUTE_RUN_ID}:${AGENT_NAME}]"
+            # macf-actions#47: PR_TITLE is attacker-controllable on a public repo.
+            # Append the route-correlation marker (macf#444 Option D), then send
+            # the whole prompt as opaque base64 DATA — decoded into a quoted remote
+            # var, NEVER interpolated. Replaces the prior `tr -d "'"` strip, which
+            # only closed the single-quote breakout (backticks/$()/newlines were
+            # left to the remote single-quoting); base64 needs no such reasoning.
+            PROMPT="${PROMPT} [macf-route:${ROUTE_RUN_ID}:${AGENT_NAME}]"
+            PROMPT_B64=$(printf '%s' "$PROMPT" | base64 | tr -d '\n')
 
             # Probe liveness with retry (groundnuty/macf#437 cause 2): alive /
             # absent / unknown; only genuine absent skips, unknown still attempts
@@ -511,12 +522,13 @@ jobs:
               fi
               if [ "$HELPER_OK" = "yes" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
                 -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                "'${HELPER}' '${TARGET}' '${SAFE_PROMPT}'"; then
+                "PROMPT=\$(printf %s '${PROMPT_B64}' | base64 -d) && '${HELPER}' '${TARGET}' \"\$PROMPT\""; then
                 echo "Routed CI completion for PR #${PR_NUMBER} to ${AGENT_NAME} via helper (target=${TARGET}, session=${SESSION_STATE})"
               elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
                 -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-                "${TMUX_BIN} send-keys -t ${TARGET} C-u \
-                  && ${TMUX_BIN} send-keys -t ${TARGET} '${SAFE_PROMPT}' Enter \
+                "PROMPT=\$(printf %s '${PROMPT_B64}' | base64 -d) \
+                  && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
+                  && ${TMUX_BIN} send-keys -t ${TARGET} \"\$PROMPT\" Enter \
                   && sleep 1 \
                   && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
                 echo "Routed CI completion for PR #${PR_NUMBER} to ${AGENT_NAME} via inline (target=${TARGET}, session=${SESSION_STATE})"
@@ -627,14 +639,12 @@ jobs:
             TARGET="$SESSION"
           fi
 
-          # PR_TITLE is user-controlled (the PR-authoring bot chose it).
-          # The helper/inline paths use single-quoted remote args; a title
-          # containing `'` would break the remote parse. Strip defensively
-          # (same caveat as route-by-ci-completion).
-          SAFE_PROMPT=$(echo "$PROMPT" | tr -d "'")
-          # macf#444 Option D: append the route-correlation marker AFTER the
-          # strip (marker is single-quote-free, so order is immaterial).
-          SAFE_PROMPT="${SAFE_PROMPT} [macf-route:${ROUTE_RUN_ID}:${AGENT_NAME}]"
+          # macf-actions#47: PR_TITLE is attacker-controllable on a public repo.
+          # Append the marker (macf#444 Option D), then send as opaque base64 DATA
+          # — decoded into a quoted remote var, never interpolated (replaces the
+          # prior `tr -d "'"` strip; same hardening as route-by-ci-completion).
+          PROMPT="${PROMPT} [macf-route:${ROUTE_RUN_ID}:${AGENT_NAME}]"
+          PROMPT_B64=$(printf '%s' "$PROMPT" | base64 | tr -d '\n')
 
           # Probe liveness with retry (groundnuty/macf#437 cause 2): alive /
           # absent / unknown; only genuine absent skips, unknown still attempts
@@ -667,12 +677,13 @@ jobs:
             fi
             if [ "$HELPER_OK" = "yes" ] && ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
               -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "'${HELPER}' '${TARGET}' '${SAFE_PROMPT}'"; then
+              "PROMPT=\$(printf %s '${PROMPT_B64}' | base64 -d) && '${HELPER}' '${TARGET}' \"\$PROMPT\""; then
               echo "Routed review-state (${REVIEW_STATE}) for PR #${PR_NUMBER} to ${AGENT_NAME} via helper (target=${TARGET}, session=${SESSION_STATE})"
             elif ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new \
               -i ~/.ssh/id_agent "${SSH_USER}@${HOST}" \
-              "${TMUX_BIN} send-keys -t ${TARGET} C-u \
-                && ${TMUX_BIN} send-keys -t ${TARGET} '${SAFE_PROMPT}' Enter \
+              "PROMPT=\$(printf %s '${PROMPT_B64}' | base64 -d) \
+                && ${TMUX_BIN} send-keys -t ${TARGET} C-u \
+                && ${TMUX_BIN} send-keys -t ${TARGET} \"\$PROMPT\" Enter \
                 && sleep 1 \
                 && ${TMUX_BIN} send-keys -t ${TARGET} Enter"; then
               echo "Routed review-state (${REVIEW_STATE}) for PR #${PR_NUMBER} to ${AGENT_NAME} via inline (target=${TARGET}, session=${SESSION_STATE})"

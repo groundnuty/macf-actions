@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Harden the router's prompt-send path against command injection (#47).** All four send jobs (`route-by-label`, `route-by-mention`, `route-by-ci-completion`, `route-by-pr-review-state`) now pass the routed prompt to the remote as opaque **base64 data**, decoded into a quoted variable on the remote before being handed to the canonical helper / `tmux send-keys` as argv — it is never interpolated into the remote shell command string. This replaces the prior `tr -d "'"` single-quote strip (line 12 below): that strip *did* contain the single-quote breakout on the `PR_TITLE` paths, but it relied on fragile char-stripping and left every send path **without** the strip (label/mention) injectable via a single-quote breakout. Event-derived text (PR titles, comment/label text — attacker-controllable on public repos) can no longer become command/prompt context on the routing path. This is a **hard prerequisite** for the self-hosted-runner work (#49), where a routing runner's blast radius rises from a throwaway hosted runner to the whole substrate VM. Adds `test/inject-safety.test.sh` demonstrating hostile titles neither execute nor get mangled in transit.
+
 ## [1.3.0] — 2026-04-17
 
 ### Added
