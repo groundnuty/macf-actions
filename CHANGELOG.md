@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.4] — 2026-06-08
+## [1.3.5] — 2026-06-08
 
 ### Security
 
@@ -15,6 +15,12 @@ All notable changes to this project will be documented in this file. The format 
 ### Performance
 
 - **Replace the Tailscale-readiness `sleep 10` with a result-invariant poll + bump the action to v4 (#42).** Each routing job's `Wait for Tailscale network` step now polls `tailscale status --json` (≤30s) asserting `BackendState == "Running"` **and** `Self.Online == true`, failing **loud** on timeout (with a diagnostic pointing at `TS_OAUTH_*` / the `tag:ci-runner` ACL) instead of the old blind 10s wait that then proceeded into a cryptic curl/ssh failure — Pattern A from `silent-fallback-hazards.md`. Bumps `tailscale/github-action` `@v3` → **v4.1.2**, pinned by commit SHA (no-floating-tags directive); v4 enables native binary caching (`use-cache: true`, default) + `tailscale up` retry. Drops the readiness wait from a fixed 10s to ~1-2s (≈8-9s/route off the dominant Tailscale phase). Inputs verified compatible at the pinned SHA; no routing-semantics change.
+
+## [1.3.4] — 2026-06-06
+
+### Added
+
+- **Route-correlation marker on the v1.x routing prompts (#45 / macf#444 Option D).** Each routed prompt carries a trailing `[macf-route:<run_id>:<agent>]` marker so the substrate's `turn_processed` receipt hook can join deliveries to turns. (Tag cut 2026-06-06; the `v1.3` / `v1` moving tags were left at v1.3.3.)
 
 ## [1.3.0] — 2026-04-17
 
