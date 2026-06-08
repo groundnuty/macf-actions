@@ -27,11 +27,25 @@ permissions:
   # first failing check (not just "CI failed").
   checks: read
 
+# macf-actions#49 — self-hosted-runner enablement (A/B switchable, inert by default):
+#   • `runs-on` is parameterized via the consumer-repo variable MACF_ROUTING_RUNS_ON.
+#     Unset → 'ubuntu-latest' (GitHub-hosted; behavior unchanged). To run routing on a
+#     VM-local self-hosted runner, set it to a JSON array of runner labels, e.g.
+#     MACF_ROUTING_RUNS_ON='["self-hosted","macf-vm"]' (the devops runner-registration
+#     label); fromJSON parses it.
+#   • On a self-hosted runner the Tailscale connect + readiness-poll steps are skipped
+#     (`if: runner.environment != 'self-hosted'`): the VM is already on the tailnet via
+#     its own tailscaled, so routing SSH reaches the agent without the hosted-runner
+#     join — eliminating the ~22s Tailscale tax. The existing SSH send path serves BOTH
+#     arms (the AC-accepted lower-diff fallback); a separate no-SSH direct-helper inject
+#     (calling tmux-send-to-claude.sh on the runner) can follow if wanted. The #47
+#     prompt-injection hardening (base64 data-passing) is the security prereq + is in.
+
 jobs:
 
   # ─── LOAD CONFIG ───
   config:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.MACF_ROUTING_RUNS_ON && fromJSON(vars.MACF_ROUTING_RUNS_ON) || 'ubuntu-latest' }}
     outputs:
       agents: ${{ steps.load.outputs.agents }}
     steps:
@@ -52,7 +66,7 @@ jobs:
       (github.event_name == 'issues') &&
       (github.event.action == 'labeled') &&
       (github.actor != 'github-actions[bot]')
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.MACF_ROUTING_RUNS_ON && fromJSON(vars.MACF_ROUTING_RUNS_ON) || 'ubuntu-latest' }}
     env:
       AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
       # macf#444 Option D: route-run id for the turn-ack correlation marker.
@@ -61,6 +75,12 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Connect to Tailscale
+        # macf-actions#49: the VM-local self-hosted runner is already on the
+        # tailnet via the host's tailscaled, so a hosted-runner join is
+        # unnecessary there — skip this + the readiness poll below. The route
+        # step's SSH then reaches the agent over the host's existing tailscaled
+        # (the AC-blessed lower-diff path; no separate no-SSH inject branch).
+        if: runner.environment != 'self-hosted'
         # macf-actions#42: pinned to v4.1.2 (newest) by commit SHA per the
         # no-floating-tags directive. v4 adds native binary caching (use-cache,
         # default true → the "cache the Tailscale binary" AC, cleaner than an
@@ -74,6 +94,7 @@ jobs:
           use-cache: true
 
       - name: Wait for Tailscale network (poll readiness, fail-loud)
+        if: runner.environment != 'self-hosted'  # macf-actions#49: skip on the VM runner (already on the tailnet)
         run: |
           set -euo pipefail
           # macf-actions#42: replace the blind `sleep 10` with a result-invariant
@@ -220,7 +241,7 @@ jobs:
       (github.event_name == 'issue_comment') ||
       (github.event_name == 'pull_request') ||
       (github.event_name == 'pull_request_review')
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.MACF_ROUTING_RUNS_ON && fromJSON(vars.MACF_ROUTING_RUNS_ON) || 'ubuntu-latest' }}
     env:
       AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
       # macf#444 Option D: route-run id for the turn-ack correlation marker.
@@ -228,6 +249,12 @@ jobs:
       AGENTS: ${{ needs.config.outputs.agents }}
     steps:
       - name: Connect to Tailscale
+        # macf-actions#49: the VM-local self-hosted runner is already on the
+        # tailnet via the host's tailscaled, so a hosted-runner join is
+        # unnecessary there — skip this + the readiness poll below. The route
+        # step's SSH then reaches the agent over the host's existing tailscaled
+        # (the AC-blessed lower-diff path; no separate no-SSH inject branch).
+        if: runner.environment != 'self-hosted'
         # macf-actions#42: pinned to v4.1.2 (newest) by commit SHA per the
         # no-floating-tags directive. v4 adds native binary caching (use-cache,
         # default true → the "cache the Tailscale binary" AC, cleaner than an
@@ -241,6 +268,7 @@ jobs:
           use-cache: true
 
       - name: Wait for Tailscale network (poll readiness, fail-loud)
+        if: runner.environment != 'self-hosted'  # macf-actions#49: skip on the VM runner (already on the tailnet)
         run: |
           set -euo pipefail
           # macf-actions#42: replace the blind `sleep 10` with a result-invariant
@@ -408,7 +436,7 @@ jobs:
     if: >
       (github.event_name == 'check_suite') &&
       (github.event.action == 'completed')
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.MACF_ROUTING_RUNS_ON && fromJSON(vars.MACF_ROUTING_RUNS_ON) || 'ubuntu-latest' }}
     env:
       AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
       # macf#444 Option D: route-run id for the turn-ack correlation marker.
@@ -421,6 +449,12 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - name: Connect to Tailscale
+        # macf-actions#49: the VM-local self-hosted runner is already on the
+        # tailnet via the host's tailscaled, so a hosted-runner join is
+        # unnecessary there — skip this + the readiness poll below. The route
+        # step's SSH then reaches the agent over the host's existing tailscaled
+        # (the AC-blessed lower-diff path; no separate no-SSH inject branch).
+        if: runner.environment != 'self-hosted'
         # macf-actions#42: pinned to v4.1.2 (newest) by commit SHA per the
         # no-floating-tags directive. v4 adds native binary caching (use-cache,
         # default true → the "cache the Tailscale binary" AC, cleaner than an
@@ -434,6 +468,7 @@ jobs:
           use-cache: true
 
       - name: Wait for Tailscale network (poll readiness, fail-loud)
+        if: runner.environment != 'self-hosted'  # macf-actions#49: skip on the VM runner (already on the tailnet)
         run: |
           set -euo pipefail
           # macf-actions#42: replace the blind `sleep 10` with a result-invariant
@@ -635,7 +670,7 @@ jobs:
       (github.event_name == 'pull_request_review') &&
       (github.event.review.state == 'approved' ||
        github.event.review.state == 'changes_requested')
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.MACF_ROUTING_RUNS_ON && fromJSON(vars.MACF_ROUTING_RUNS_ON) || 'ubuntu-latest' }}
     env:
       AGENT_SSH_KEY: ${{ secrets.AGENT_SSH_KEY }}
       # macf#444 Option D: route-run id for the turn-ack correlation marker.
@@ -652,6 +687,12 @@ jobs:
       REVIEW_URL: ${{ github.event.review.html_url }}
     steps:
       - name: Connect to Tailscale
+        # macf-actions#49: the VM-local self-hosted runner is already on the
+        # tailnet via the host's tailscaled, so a hosted-runner join is
+        # unnecessary there — skip this + the readiness poll below. The route
+        # step's SSH then reaches the agent over the host's existing tailscaled
+        # (the AC-blessed lower-diff path; no separate no-SSH inject branch).
+        if: runner.environment != 'self-hosted'
         # macf-actions#42: pinned to v4.1.2 (newest) by commit SHA per the
         # no-floating-tags directive. v4 adds native binary caching (use-cache,
         # default true → the "cache the Tailscale binary" AC, cleaner than an
@@ -665,6 +706,7 @@ jobs:
           use-cache: true
 
       - name: Wait for Tailscale network (poll readiness, fail-loud)
+        if: runner.environment != 'self-hosted'  # macf-actions#49: skip on the VM runner (already on the tailnet)
         run: |
           set -euo pipefail
           # macf-actions#42: replace the blind `sleep 10` with a result-invariant
@@ -805,7 +847,7 @@ jobs:
     if: >
       (github.event_name == 'issues') &&
       (github.event.action == 'closed')
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.MACF_ROUTING_RUNS_ON && fromJSON(vars.MACF_ROUTING_RUNS_ON) || 'ubuntu-latest' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
