@@ -61,14 +61,41 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Connect to Tailscale
-        uses: tailscale/github-action@v3
+        # macf-actions#42: pinned to v4.1.2 (newest) by commit SHA per the
+        # no-floating-tags directive. v4 adds native binary caching (use-cache,
+        # default true → the "cache the Tailscale binary" AC, cleaner than an
+        # actions/cache hack) + `tailscale up` retry. Inputs verified unchanged
+        # from v3 at this SHA (oauth-client-id / oauth-secret / tags).
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4.1.2
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
+          use-cache: true
 
-      - name: Wait for Tailscale network
-        run: sleep 10
+      - name: Wait for Tailscale network (poll readiness, fail-loud)
+        run: |
+          set -euo pipefail
+          # macf-actions#42: replace the blind `sleep 10` with a result-invariant
+          # readiness poll (Pattern A, silent-fallback-hazards.md). Assert the local
+          # tailnet backend is Running AND this node is Online before any tailnet op;
+          # FAIL LOUD on timeout instead of proceeding into a cryptic curl/ssh failure
+          # (Instance-9 defense, #48). Same assert shape as macf's route-reconciler.yml
+          # "Verify tailnet is up". Typically ready in ~1-2s vs the old fixed 10s.
+          for i in $(seq 1 30); do
+            json=$(tailscale status --json 2>/dev/null || echo '{}')
+            state=$(printf '%s' "$json" | jq -r '.BackendState // "Unknown"')
+            online=$(printf '%s' "$json" | jq -r '.Self.Online // false')
+            if [ "$state" = "Running" ] && [ "$online" = "true" ]; then
+              echo "Tailscale ready after ${i}s (BackendState=Running, Self.Online=true)"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Tailscale not ready after 30s (BackendState=${state}, Self.Online=${online}). The tailnet never came up — routing would fail. Check TS_OAUTH_* secrets + the tag:ci-runner ACL." >&2
+              exit 1
+            fi
+            sleep 1
+          done
 
       - name: Route to agent by label
         env:
@@ -201,14 +228,41 @@ jobs:
       AGENTS: ${{ needs.config.outputs.agents }}
     steps:
       - name: Connect to Tailscale
-        uses: tailscale/github-action@v3
+        # macf-actions#42: pinned to v4.1.2 (newest) by commit SHA per the
+        # no-floating-tags directive. v4 adds native binary caching (use-cache,
+        # default true → the "cache the Tailscale binary" AC, cleaner than an
+        # actions/cache hack) + `tailscale up` retry. Inputs verified unchanged
+        # from v3 at this SHA (oauth-client-id / oauth-secret / tags).
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4.1.2
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
+          use-cache: true
 
-      - name: Wait for Tailscale network
-        run: sleep 10
+      - name: Wait for Tailscale network (poll readiness, fail-loud)
+        run: |
+          set -euo pipefail
+          # macf-actions#42: replace the blind `sleep 10` with a result-invariant
+          # readiness poll (Pattern A, silent-fallback-hazards.md). Assert the local
+          # tailnet backend is Running AND this node is Online before any tailnet op;
+          # FAIL LOUD on timeout instead of proceeding into a cryptic curl/ssh failure
+          # (Instance-9 defense, #48). Same assert shape as macf's route-reconciler.yml
+          # "Verify tailnet is up". Typically ready in ~1-2s vs the old fixed 10s.
+          for i in $(seq 1 30); do
+            json=$(tailscale status --json 2>/dev/null || echo '{}')
+            state=$(printf '%s' "$json" | jq -r '.BackendState // "Unknown"')
+            online=$(printf '%s' "$json" | jq -r '.Self.Online // false')
+            if [ "$state" = "Running" ] && [ "$online" = "true" ]; then
+              echo "Tailscale ready after ${i}s (BackendState=Running, Self.Online=true)"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Tailscale not ready after 30s (BackendState=${state}, Self.Online=${online}). The tailnet never came up — routing would fail. Check TS_OAUTH_* secrets + the tag:ci-runner ACL." >&2
+              exit 1
+            fi
+            sleep 1
+          done
 
       - name: Route to mentioned agents
         env:
@@ -367,14 +421,41 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - name: Connect to Tailscale
-        uses: tailscale/github-action@v3
+        # macf-actions#42: pinned to v4.1.2 (newest) by commit SHA per the
+        # no-floating-tags directive. v4 adds native binary caching (use-cache,
+        # default true → the "cache the Tailscale binary" AC, cleaner than an
+        # actions/cache hack) + `tailscale up` retry. Inputs verified unchanged
+        # from v3 at this SHA (oauth-client-id / oauth-secret / tags).
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4.1.2
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
+          use-cache: true
 
-      - name: Wait for Tailscale network
-        run: sleep 10
+      - name: Wait for Tailscale network (poll readiness, fail-loud)
+        run: |
+          set -euo pipefail
+          # macf-actions#42: replace the blind `sleep 10` with a result-invariant
+          # readiness poll (Pattern A, silent-fallback-hazards.md). Assert the local
+          # tailnet backend is Running AND this node is Online before any tailnet op;
+          # FAIL LOUD on timeout instead of proceeding into a cryptic curl/ssh failure
+          # (Instance-9 defense, #48). Same assert shape as macf's route-reconciler.yml
+          # "Verify tailnet is up". Typically ready in ~1-2s vs the old fixed 10s.
+          for i in $(seq 1 30); do
+            json=$(tailscale status --json 2>/dev/null || echo '{}')
+            state=$(printf '%s' "$json" | jq -r '.BackendState // "Unknown"')
+            online=$(printf '%s' "$json" | jq -r '.Self.Online // false')
+            if [ "$state" = "Running" ] && [ "$online" = "true" ]; then
+              echo "Tailscale ready after ${i}s (BackendState=Running, Self.Online=true)"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Tailscale not ready after 30s (BackendState=${state}, Self.Online=${online}). The tailnet never came up — routing would fail. Check TS_OAUTH_* secrets + the tag:ci-runner ACL." >&2
+              exit 1
+            fi
+            sleep 1
+          done
 
       - name: Route CI completion to agent-authored PRs
         run: |
@@ -571,14 +652,41 @@ jobs:
       REVIEW_URL: ${{ github.event.review.html_url }}
     steps:
       - name: Connect to Tailscale
-        uses: tailscale/github-action@v3
+        # macf-actions#42: pinned to v4.1.2 (newest) by commit SHA per the
+        # no-floating-tags directive. v4 adds native binary caching (use-cache,
+        # default true → the "cache the Tailscale binary" AC, cleaner than an
+        # actions/cache hack) + `tailscale up` retry. Inputs verified unchanged
+        # from v3 at this SHA (oauth-client-id / oauth-secret / tags).
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4.1.2
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
+          use-cache: true
 
-      - name: Wait for Tailscale network
-        run: sleep 10
+      - name: Wait for Tailscale network (poll readiness, fail-loud)
+        run: |
+          set -euo pipefail
+          # macf-actions#42: replace the blind `sleep 10` with a result-invariant
+          # readiness poll (Pattern A, silent-fallback-hazards.md). Assert the local
+          # tailnet backend is Running AND this node is Online before any tailnet op;
+          # FAIL LOUD on timeout instead of proceeding into a cryptic curl/ssh failure
+          # (Instance-9 defense, #48). Same assert shape as macf's route-reconciler.yml
+          # "Verify tailnet is up". Typically ready in ~1-2s vs the old fixed 10s.
+          for i in $(seq 1 30); do
+            json=$(tailscale status --json 2>/dev/null || echo '{}')
+            state=$(printf '%s' "$json" | jq -r '.BackendState // "Unknown"')
+            online=$(printf '%s' "$json" | jq -r '.Self.Online // false')
+            if [ "$state" = "Running" ] && [ "$online" = "true" ]; then
+              echo "Tailscale ready after ${i}s (BackendState=Running, Self.Online=true)"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Tailscale not ready after 30s (BackendState=${state}, Self.Online=${online}). The tailnet never came up — routing would fail. Check TS_OAUTH_* secrets + the tag:ci-runner ACL." >&2
+              exit 1
+            fi
+            sleep 1
+          done
 
       - name: Route PR review state to the PR author
         run: |

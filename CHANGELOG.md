@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file. The format 
 
 - **Harden the router's prompt-send path against command injection (#47).** All four send jobs (`route-by-label`, `route-by-mention`, `route-by-ci-completion`, `route-by-pr-review-state`) now pass the routed prompt to the remote as opaque **base64 data**, decoded into a quoted variable on the remote before being handed to the canonical helper / `tmux send-keys` as argv — it is never interpolated into the remote shell command string. This replaces the prior `tr -d "'"` single-quote strip (line 12 below): that strip *did* contain the single-quote breakout on the `PR_TITLE` paths, but it relied on fragile char-stripping and left every send path **without** the strip (label/mention) injectable via a single-quote breakout. Event-derived text (PR titles, comment/label text — attacker-controllable on public repos) can no longer become command/prompt context on the routing path. This is a **hard prerequisite** for the self-hosted-runner work (#49), where a routing runner's blast radius rises from a throwaway hosted runner to the whole substrate VM. Adds `test/inject-safety.test.sh` demonstrating hostile titles neither execute nor get mangled in transit.
 
+### Performance
+
+- **Replace the Tailscale-readiness `sleep 10` with a result-invariant poll + bump the action to v4 (#42).** Each routing job's `Wait for Tailscale network` step now polls `tailscale status --json` (≤30s) asserting `BackendState == "Running"` **and** `Self.Online == true`, failing **loud** on timeout (with a diagnostic pointing at `TS_OAUTH_*` / the `tag:ci-runner` ACL) instead of the old blind 10s wait that then proceeded into a cryptic curl/ssh failure — Pattern A from `silent-fallback-hazards.md`. Bumps `tailscale/github-action` `@v3` → **v4.1.2**, pinned by commit SHA (no-floating-tags directive); v4 enables native binary caching (`use-cache: true`, default) + `tailscale up` retry. Drops the readiness wait from a fixed 10s to ~1-2s (≈8-9s/route off the dominant Tailscale phase). Inputs verified compatible at the pinned SHA; no routing-semantics change.
+
 ## [1.3.0] — 2026-04-17
 
 ### Added
