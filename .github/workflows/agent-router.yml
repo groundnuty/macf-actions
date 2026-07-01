@@ -172,7 +172,19 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
     steps:
+      # macf-actions#64: the self-hosted `macf-vm` runner is ALREADY a
+      # tailnet node (persistent VM) — re-running the ephemeral-runner
+      # tailnet-join here is both redundant and observed to hard-fail
+      # (`exit 1` at this step) on that runner, killing the job before
+      # its mTLS POST. Skip join/assert/wait when origin-routing (#59)
+      # picked the self-hosted runner; only github-hosted (ephemeral,
+      # off-tailnet by default) needs to join. `needs.pick-runner.outputs.labels`
+      # is a job output (always a string at this context — c.f. the
+      # `fromJSON()` at this job's `runs-on:`), holding either the literal
+      # string `"ubuntu-latest"` or `["self-hosted","macf-vm"]`; `contains()`
+      # does a substring match against that raw string.
       - name: Connect to Tailscale
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         uses: tailscale/github-action@v3
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
@@ -180,6 +192,7 @@ jobs:
           tags: tag:ci-runner
 
       - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: |
           tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null \
             || { echo "::error::tailnet did not come up — BackendState != Running.";
@@ -188,6 +201,7 @@ jobs:
           echo "✓ tailnet up (BackendState=Running)"
 
       - name: Wait for Tailscale network
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: sleep 10
 
       - name: Label gate (skip non-agent labels + self-routing)
@@ -399,7 +413,19 @@ jobs:
       # is the unambiguous form regardless.
       REVIEW_STATE_NOTIFIED: ${{ needs['route-by-pr-review-state'].outputs.notified }}
     steps:
+      # macf-actions#64: the self-hosted `macf-vm` runner is ALREADY a
+      # tailnet node (persistent VM) — re-running the ephemeral-runner
+      # tailnet-join here is both redundant and observed to hard-fail
+      # (`exit 1` at this step) on that runner, killing the job before
+      # its mTLS POST. Skip join/assert/wait when origin-routing (#59)
+      # picked the self-hosted runner; only github-hosted (ephemeral,
+      # off-tailnet by default) needs to join. `needs.pick-runner.outputs.labels`
+      # is a job output (always a string at this context — c.f. the
+      # `fromJSON()` at this job's `runs-on:`), holding either the literal
+      # string `"ubuntu-latest"` or `["self-hosted","macf-vm"]`; `contains()`
+      # does a substring match against that raw string.
       - name: Connect to Tailscale
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         uses: tailscale/github-action@v3
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
@@ -407,6 +433,7 @@ jobs:
           tags: tag:ci-runner
 
       - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: |
           tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null \
             || { echo "::error::tailnet did not come up — BackendState != Running.";
@@ -415,6 +442,7 @@ jobs:
           echo "✓ tailnet up (BackendState=Running)"
 
       - name: Wait for Tailscale network
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: sleep 10
 
       - name: Mint registry-read token
@@ -591,7 +619,19 @@ jobs:
       # uses the inline registry lookup (loop-driven, can't use the
       # composite). Previously had a sparse-checkout as defensive
       # leftover; removed in v3.0.2. See groundnuty/macf-actions#22.
+      # macf-actions#64: the self-hosted `macf-vm` runner is ALREADY a
+      # tailnet node (persistent VM) — re-running the ephemeral-runner
+      # tailnet-join here is both redundant and observed to hard-fail
+      # (`exit 1` at this step) on that runner, killing the job before
+      # its mTLS POST. Skip join/assert/wait when origin-routing (#59)
+      # picked the self-hosted runner; only github-hosted (ephemeral,
+      # off-tailnet by default) needs to join. `needs.pick-runner.outputs.labels`
+      # is a job output (always a string at this context — c.f. the
+      # `fromJSON()` at this job's `runs-on:`), holding either the literal
+      # string `"ubuntu-latest"` or `["self-hosted","macf-vm"]`; `contains()`
+      # does a substring match against that raw string.
       - name: Connect to Tailscale
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         uses: tailscale/github-action@v3
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
@@ -599,6 +639,7 @@ jobs:
           tags: tag:ci-runner
 
       - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: |
           tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null \
             || { echo "::error::tailnet did not come up — BackendState != Running.";
@@ -607,6 +648,7 @@ jobs:
           echo "✓ tailnet up (BackendState=Running)"
 
       - name: Wait for Tailscale network
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: sleep 10
 
       - name: Mint registry-read token
@@ -795,7 +837,19 @@ jobs:
       REVIEW_BODY: ${{ github.event.review.body }}
       PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
     steps:
+      # macf-actions#64: the self-hosted `macf-vm` runner is ALREADY a
+      # tailnet node (persistent VM) — re-running the ephemeral-runner
+      # tailnet-join here is both redundant and observed to hard-fail
+      # (`exit 1` at this step) on that runner, killing the job before
+      # its mTLS POST. Skip join/assert/wait when origin-routing (#59)
+      # picked the self-hosted runner; only github-hosted (ephemeral,
+      # off-tailnet by default) needs to join. `needs.pick-runner.outputs.labels`
+      # is a job output (always a string at this context — c.f. the
+      # `fromJSON()` at this job's `runs-on:`), holding either the literal
+      # string `"ubuntu-latest"` or `["self-hosted","macf-vm"]`; `contains()`
+      # does a substring match against that raw string.
       - name: Connect to Tailscale
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         uses: tailscale/github-action@v3
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
@@ -803,6 +857,7 @@ jobs:
           tags: tag:ci-runner
 
       - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: |
           tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null \
             || { echo "::error::tailnet did not come up — BackendState != Running.";
@@ -811,6 +866,7 @@ jobs:
           echo "✓ tailnet up (BackendState=Running)"
 
       - name: Wait for Tailscale network
+        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: sleep 10
 
       - name: Mint registry-read token
