@@ -821,15 +821,21 @@ jobs:
           private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
           owner: ${{ github.repository_owner }}
 
-      - name: Route PR review state to author + body-mentioned agents (mTLS POST)
+      - name: Route PR review state to the deliberate-review-engagement set (mTLS POST)
         id: route
         env:
           REG_TOKEN: ${{ steps.registry-token.outputs.token }}
           REG_PATH: ${{ inputs.registry-api-path }}
         run: |
           set -euo pipefail
+          set -f  # macf#56: disable globbing — reviewer/requested logins contain `[bot]`; the unquoted `for login in $…_LOGINS` loops below must not glob-expand it
 
-          # ── Build the recipient set: {author} ∪ {body-@mentioned agents} ──
+          # ── Build the recipient set (macf#62 — full Instance-13
+          # closure): {author} ∪ {body-@mentioned} ∪ {formal reviewers}
+          # ∪ {requested reviewers}. All four sources fold into the
+          # same deduped RECIPIENTS list, which flows into the same
+          # `notified` output route-by-mention's #58 dedup reads —
+          # extending the SET, not adding a second emit path.
           #
           # RECIPIENTS is a space-delimited list of registry-key agent
           # names (e.g. "code-agent science-agent"). Membership check is
@@ -843,15 +849,28 @@ jobs:
             esac
           }
 
+          # Resolve a `<bot-name>[bot]` login to its registry key via
+          # the agents map's app_name field, and add_recipient it if
+          # found. Non-agent logins (human reviewers, unregistered
+          # bots) are silently dropped — same registry-miss behavior
+          # as the pre-existing author-resolution loop below.
+          add_recipient_by_login() {
+            login="$1"
+            for CANDIDATE in $(echo "$AGENTS" | jq -r 'keys[]'); do
+              APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$CANDIDATE" '.[$a].app_name // empty')
+              if [ -n "$APP_NAME" ] && [ "$login" = "${APP_NAME}[bot]" ]; then
+                add_recipient "$CANDIDATE"
+                return 0
+              fi
+            done
+          }
+
           # Resolve PR_AUTHOR (`<bot-name>[bot]`) → AGENT_NAME via the
           # agents map's app_name field (same loop as route-by-ci-
           # completion). Human-authored PRs have no channel-server, so
           # a non-agent author simply isn't added — falls through to the
-          # mention-only recipients below (if any).
-          for CANDIDATE in $(echo "$AGENTS" | jq -r 'keys[]'); do
-            APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$CANDIDATE" '.[$a].app_name // empty')
-            [ "$PR_AUTHOR" = "${APP_NAME}[bot]" ] && { add_recipient "$CANDIDATE"; break; }
-          done
+          # other recipient sources below (if any).
+          add_recipient_by_login "$PR_AUTHOR"
 
           # #57: also route to every registered agent @mentioned in the
           # review BODY. Mirrors route-by-mention's code-context strip +
@@ -872,8 +891,37 @@ jobs:
             fi
           done
 
+          # macf#62: also route to every agent who has submitted a
+          # FORMAL REVIEW on this PR (any state — APPROVED, CHANGES_
+          # REQUESTED, COMMENTED — a co-reviewer who left a COMMENTED
+          # review is deliberately engaged too), and every agent listed
+          # as a REQUESTED reviewer who hasn't reviewed yet. This is the
+          # gap #57 left open: the motivating Instance-13 incident was a
+          # gate-owner who had formally APPROVED but was never
+          # @mentioned in any body — author + body-mentions alone would
+          # still miss them. GH_TOKEN here is the job's own
+          # secrets.GITHUB_TOKEN (already in env), sufficient to read
+          # reviews/requested_reviewers on an in-repo PR.
+          # INCLUDE-ALL-REVIEW-STATES BY DESIGN: /reviews returns every state
+          # (APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED). We notify
+          # them ALL — the Instance-13 lesson is "never MISS a gate-owner", and
+          # a spurious notify to a dismissed reviewer is far cheaper than missing
+          # a live one. Do NOT "tighten" this to APPROVED-only — that re-opens
+          # the Instance-13 miss (silent-fallback-hazards.md #13, macf#62).
+          REVIEWER_LOGINS=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+            --paginate --jq '.[].user.login' 2>/dev/null || true)
+          for login in $REVIEWER_LOGINS; do
+            add_recipient_by_login "$login"
+          done
+
+          REQUESTED_LOGINS=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/requested_reviewers" \
+            --jq '.users[].login' 2>/dev/null || true)
+          for login in $REQUESTED_LOGINS; do
+            add_recipient_by_login "$login"
+          done
+
           if [ -z "$RECIPIENTS" ]; then
-            echo "PR #${PR_NUMBER} author '${PR_AUTHOR}' not a registered agent and no registered agent mentioned in review body; skipping (review-state events only route to registered agents)"
+            echo "PR #${PR_NUMBER}: no registered agent among author, body-@mentions, formal reviewers, or requested reviewers; skipping (review-state events only route to registered agents)"
             echo "notified=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
