@@ -828,6 +828,7 @@ jobs:
           REG_PATH: ${{ inputs.registry-api-path }}
         run: |
           set -euo pipefail
+          set -f  # macf#56: disable globbing — reviewer/requested logins contain `[bot]`; the unquoted `for login in $…_LOGINS` loops below must not glob-expand it
 
           # ── Build the recipient set (macf#62 — full Instance-13
           # closure): {author} ∪ {body-@mentioned} ∪ {formal reviewers}
