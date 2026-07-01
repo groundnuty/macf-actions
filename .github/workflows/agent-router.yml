@@ -902,6 +902,12 @@ jobs:
           # still miss them. GH_TOKEN here is the job's own
           # secrets.GITHUB_TOKEN (already in env), sufficient to read
           # reviews/requested_reviewers on an in-repo PR.
+          # INCLUDE-ALL-REVIEW-STATES BY DESIGN: /reviews returns every state
+          # (APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED). We notify
+          # them ALL — the Instance-13 lesson is "never MISS a gate-owner", and
+          # a spurious notify to a dismissed reviewer is far cheaper than missing
+          # a live one. Do NOT "tighten" this to APPROVED-only — that re-opens
+          # the Instance-13 miss (silent-fallback-hazards.md #13, macf#62).
           REVIEWER_LOGINS=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
             --paginate --jq '.[].user.login' 2>/dev/null || true)
           for login in $REVIEWER_LOGINS; do
