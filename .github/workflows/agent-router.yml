@@ -91,9 +91,47 @@ permissions:
 
 jobs:
 
+  # ─── RUNNER SELECTION (origin-routing — #59 / devops-toolkit#90) ───
+  # Trusted actor on a NON-fork event → self-hosted VM runner (fast path,
+  # ~6-9s vs ~40s); everyone else (outsiders / fork PRs) → github-hosted.
+  # FAILS SAFE: unset/empty MACF_TRUSTED_ACTORS (the CALLER repo's var) →
+  # ubuntu-latest (today's behaviour). So this lands BEFORE any runner exists;
+  # the self-hosted branch activates only once the var is set AND a runner is
+  # registered (register-before-route sequencing — devops RUNNER.md). Trust is
+  # decided from github.actor + head.repo.fork, both GitHub-set (not spoofable).
+  # Every downstream job derives runs-on from this job's output.
+  pick-runner:
+    runs-on: ubuntu-latest
+    outputs:
+      labels: ${{ steps.pick.outputs.labels }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          TRUSTED_ACTORS: ${{ vars.MACF_TRUSTED_ACTORS }}
+          ACTOR: ${{ github.actor }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        run: |
+          set -euo pipefail
+          set -f  # disable globbing — actor logins contain [bot]
+          labels='"ubuntu-latest"'   # default: github-hosted (safe fallback)
+          # Self-host ONLY for a trusted actor on a non-fork event. Logins in
+          # MACF_TRUSTED_ACTORS are comma / space / newline separated.
+          if [ "${IS_FORK:-}" != "true" ] && [ -n "${TRUSTED_ACTORS:-}" ]; then
+            for a in ${TRUSTED_ACTORS//,/ }; do
+              if [ "$a" = "$ACTOR" ]; then
+                labels='["self-hosted","macf-vm"]'
+                break
+              fi
+            done
+          fi
+          echo "labels=$labels" >> "$GITHUB_OUTPUT"
+          echo "runner: actor='$ACTOR' fork='${IS_FORK:-false}' -> $labels"
+
   # ─── LOAD CONFIG ───
   config:
-    runs-on: ubuntu-latest
+    needs: pick-runner
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
     outputs:
       agents: ${{ steps.load.outputs.agents }}
       project-seg: ${{ steps.compute.outputs.project-seg }}
@@ -120,12 +158,12 @@ jobs:
 
   # ─── LABEL ROUTING ───
   route-by-label:
-    needs: config
+    needs: [config, pick-runner]
     if: >
       (github.event_name == 'issues') &&
       (github.event.action == 'labeled') &&
       (github.actor != 'github-actions[bot]')
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
       PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
@@ -287,12 +325,12 @@ jobs:
 
   # ─── @MENTION ROUTING ───
   route-by-mention:
-    needs: config
+    needs: [config, pick-runner]
     if: >
       (github.event_name == 'issue_comment') ||
       (github.event_name == 'pull_request') ||
       (github.event_name == 'pull_request_review')
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
       PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
@@ -443,11 +481,11 @@ jobs:
 
   # ─── CI COMPLETION ROUTING ───
   route-by-ci-completion:
-    needs: config
+    needs: [config, pick-runner]
     if: >
       (github.event_name == 'check_suite') &&
       (github.event.action == 'completed')
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
       PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
@@ -620,7 +658,7 @@ jobs:
   # Receiver-side schema (groundnuty/macf#293, v0.2.7+):
   #   PrReviewStatePayloadSchema in @groundnuty/macf-core
   route-by-pr-review-state:
-    needs: config
+    needs: [config, pick-runner]
     if: >
       (github.event_name == 'pull_request_review') &&
       (github.event.action == 'submitted') &&
@@ -628,7 +666,7 @@ jobs:
         github.event.review.state == 'approved' ||
         github.event.review.state == 'changes_requested'
       )
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
       PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
@@ -753,10 +791,11 @@ jobs:
 
   # ─── LABEL CLEANUP ON CLOSE ───
   cleanup-labels:
+    needs: pick-runner
     if: >
       (github.event_name == 'issues') &&
       (github.event.action == 'closed')
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
