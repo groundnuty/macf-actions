@@ -179,6 +179,14 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
 
+      - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
+        run: |
+          tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null \
+            || { echo "::error::tailnet did not come up — BackendState != Running.";
+                 echo "::error::The connect action may have exhausted retries and exited 0 anyway (bad TS_OAUTH_* or tag/ACL mismatch → Status 400 on every retry).";
+                 tailscale status || true; exit 1; }
+          echo "✓ tailnet up (BackendState=Running)"
+
       - name: Wait for Tailscale network
         run: sleep 10
 
@@ -324,12 +332,54 @@ jobs:
             --body "Agent \`${APP_NAME}[bot]\` is not registered (registry miss). Issue will be picked up when the agent starts and registers."
 
   # ─── @MENTION ROUTING ───
+  #
+  # #58 (in-run dedup companion to #57): `needs` now includes
+  # route-by-pr-review-state so this job can read its `notified` output
+  # and skip re-notifying (via `mention`) any agent that job already
+  # targeted with a `pr_review_state` POST for the SAME
+  # pull_request_review event — closing the double-notify observed on
+  # macf-devops-toolkit#120 (author also @mentioned in the review body
+  # → got both "approved PR #N" AND "You were mentioned in PR #N").
+  #
+  # route-by-pr-review-state only ever runs on `pull_request_review`
+  # (submitted, approved/changes_requested) — on every other event this
+  # job fires on (`issue_comment`, `pull_request`, and
+  # `pull_request_review` with state=commented/dismissed) that job is
+  # SKIPPED by its own `if:`. Per GitHub's documented needs-propagation
+  # ("if a job fails or is skipped, all jobs that need it are skipped
+  # unless the jobs use a conditional expression that causes the job to
+  # continue" — Actions docs, "Defining prerequisite jobs"), the
+  # skip WOULD cascade to this job under the implicit default
+  # `if: success()` (which additionally requires EVERY needed job —
+  # including route-by-pr-review-state — to have succeeded). The fix is
+  # NOT a blanket `!cancelled()` / `always()` override (that would also
+  # let this job run with a broken $AGENTS if `config` itself failed,
+  # a behavior change from today — `config` has no `if:` gate and
+  # always attempts to run, so its failure is a real possibility this
+  # job must still stand down on, exactly as it did before this needs-
+  # chain existed). Instead: gate explicitly on
+  # `needs.config.result == 'success'` (preserves today's config-
+  # dependency semantics exactly) while deliberately NOT checking
+  # route-by-pr-review-state's result at all — skipped, succeeded, or
+  # failed, this job runs regardless, decoupling mention-routing from
+  # review-state-routing's outcome per #58. `!cancelled()` is added as
+  # documented defense-in-depth against a cancellation landing in the
+  # narrow window between `config` finishing and this job starting
+  # (preferred over `always()`, which the docs flag as also forcing a
+  # run through an in-flight cancellation). The trigger condition
+  # itself is unchanged — restated here because adding any custom `if:`
+  # replaces the implicit default, so the original three-event gate has
+  # to be spelled out explicitly alongside the two status checks.
   route-by-mention:
-    needs: [config, pick-runner]
+    needs: [config, pick-runner, route-by-pr-review-state]
     if: >
-      (github.event_name == 'issue_comment') ||
-      (github.event_name == 'pull_request') ||
-      (github.event_name == 'pull_request_review')
+      (needs.config.result == 'success') &&
+      (!cancelled()) &&
+      (
+        (github.event_name == 'issue_comment') ||
+        (github.event_name == 'pull_request') ||
+        (github.event_name == 'pull_request_review')
+      )
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
@@ -337,6 +387,17 @@ jobs:
       ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
       ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
+      # Empty string on every event where route-by-pr-review-state
+      # didn't run/notify anyone this run (issue_comment, pull_request,
+      # or a pull_request_review whose state was commented/dismissed,
+      # or one where it found no registered recipient) — safe no-op
+      # membership check below in all those cases.
+      #
+      # Bracket ("index") notation, NOT dot notation — the job id
+      # contains hyphens, which dot-property-dereference doesn't parse
+      # as part of the identifier. `needs['route-by-pr-review-state']`
+      # is the unambiguous form regardless.
+      REVIEW_STATE_NOTIFIED: ${{ needs['route-by-pr-review-state'].outputs.notified }}
     steps:
       - name: Connect to Tailscale
         uses: tailscale/github-action@v3
@@ -344,6 +405,14 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
+
+      - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
+        run: |
+          tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null \
+            || { echo "::error::tailnet did not come up — BackendState != Running.";
+                 echo "::error::The connect action may have exhausted retries and exited 0 anyway (bad TS_OAUTH_* or tag/ACL mismatch → Status 400 on every retry).";
+                 tailscale status || true; exit 1; }
+          echo "✓ tailnet up (BackendState=Running)"
 
       - name: Wait for Tailscale network
         run: sleep 10
@@ -425,6 +494,26 @@ jobs:
           for AGENT_NAME in $(echo "$AGENTS" | jq -r 'keys[]'); do
             APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].app_name // empty')
             [ "$ACTOR" = "${APP_NAME}[bot]" ] && continue
+
+            # #58: on a pull_request_review event, route-by-pr-review-state
+            # (which runs first per this job's needs:) already routed a
+            # pr_review_state POST to this exact recipient set this run —
+            # skip the redundant `mention` so the agent isn't notified
+            # twice for one review (macf-devops-toolkit#120). Exact-token
+            # match on the space-delimited list, bounded both sides so a
+            # hyphenated name can't partially match a different agent.
+            # REVIEW_STATE_NOTIFIED is empty on every non-review event and
+            # on review events route-by-pr-review-state didn't act on
+            # (commented/dismissed state, or no registered recipient) —
+            # the check is then always false, no over-suppression.
+            if [ "$EVENT_NAME" = "pull_request_review" ]; then
+              case " ${REVIEW_STATE_NOTIFIED:-} " in
+                *" $AGENT_NAME "*)
+                  echo "Skipping mention route to ${AGENT_NAME}: already notified via pr_review_state this run"
+                  continue
+                  ;;
+              esac
+            fi
 
             # Fixed-string match instead of regex: $BODY_CLEAN is user-
             # controlled (issue comment, PR body, review body) but with
@@ -508,6 +597,14 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
+
+      - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
+        run: |
+          tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null \
+            || { echo "::error::tailnet did not come up — BackendState != Running.";
+                 echo "::error::The connect action may have exhausted retries and exited 0 anyway (bad TS_OAUTH_* or tag/ACL mismatch → Status 400 on every retry).";
+                 tailscale status || true; exit 1; }
+          echo "✓ tailnet up (BackendState=Running)"
 
       - name: Wait for Tailscale network
         run: sleep 10
@@ -657,6 +754,20 @@ jobs:
   #
   # Receiver-side schema (groundnuty/macf#293, v0.2.7+):
   #   PrReviewStatePayloadSchema in @groundnuty/macf-core
+  #
+  # #57 (silent-fallback Instance 13 structural retirement): also routes
+  # to every registered agent @mentioned in the review BODY, not just the
+  # PR author — a reviewer can unblock a third-party gate-owner with the
+  # same review. Reuses route-by-mention's code-context-strip + fixed-
+  # string @mention match (see that job for the ReDoS-safety rationale).
+  # Recipient set = {author} ∪ {body-mentioned registered agents},
+  # deduped, so an author who is also self-mentioned gets exactly one
+  # pr_review_state POST.
+  #
+  # #58 (in-run dedup companion): exposes `outputs.notified` — the
+  # space-separated list of agent-label recipients actually targeted this
+  # run — so route-by-mention can skip re-notifying them via a `mention`
+  # for the SAME pull_request_review event.
   route-by-pr-review-state:
     needs: [config, pick-runner]
     if: >
@@ -667,6 +778,8 @@ jobs:
         github.event.review.state == 'changes_requested'
       )
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
+    outputs:
+      notified: ${{ steps.route.outputs.notified }}
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
       PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
@@ -679,6 +792,7 @@ jobs:
       REVIEW_STATE: ${{ github.event.review.state }}
       REVIEWER_LOGIN: ${{ github.event.review.user.login }}
       REVIEW_URL: ${{ github.event.review.html_url }}
+      REVIEW_BODY: ${{ github.event.review.body }}
       PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
     steps:
       - name: Connect to Tailscale
@@ -687,6 +801,14 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
+
+      - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
+        run: |
+          tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null \
+            || { echo "::error::tailnet did not come up — BackendState != Running.";
+                 echo "::error::The connect action may have exhausted retries and exited 0 anyway (bad TS_OAUTH_* or tag/ACL mismatch → Status 400 on every retry).";
+                 tailscale status || true; exit 1; }
+          echo "✓ tailnet up (BackendState=Running)"
 
       - name: Wait for Tailscale network
         run: sleep 10
@@ -699,53 +821,66 @@ jobs:
           private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
           owner: ${{ github.repository_owner }}
 
-      - name: Route PR review state to PR author (mTLS POST)
+      - name: Route PR review state to author + body-mentioned agents (mTLS POST)
+        id: route
         env:
           REG_TOKEN: ${{ steps.registry-token.outputs.token }}
           REG_PATH: ${{ inputs.registry-api-path }}
         run: |
           set -euo pipefail
 
-          # Resolve PR_AUTHOR (`<bot-name>[bot]`) → AGENT_NAME via
-          # the agents map's app_name field (same loop as route-by-
-          # ci-completion). PR author must be a registered agent —
-          # this skips review notifications for human-authored PRs
-          # since they have no channel-server to notify.
-          AGENT_NAME=""
+          # ── Build the recipient set: {author} ∪ {body-@mentioned agents} ──
+          #
+          # RECIPIENTS is a space-delimited list of registry-key agent
+          # names (e.g. "code-agent science-agent"). Membership check is
+          # exact-token (space-bounded substring), safe regardless of
+          # hyphens in agent names.
+          RECIPIENTS=""
+          add_recipient() {
+            case " $RECIPIENTS " in
+              *" $1 "*) ;; # already present — dedupe (#58 same-recipient case)
+              *) RECIPIENTS="${RECIPIENTS:+$RECIPIENTS }$1" ;;
+            esac
+          }
+
+          # Resolve PR_AUTHOR (`<bot-name>[bot]`) → AGENT_NAME via the
+          # agents map's app_name field (same loop as route-by-ci-
+          # completion). Human-authored PRs have no channel-server, so
+          # a non-agent author simply isn't added — falls through to the
+          # mention-only recipients below (if any).
           for CANDIDATE in $(echo "$AGENTS" | jq -r 'keys[]'); do
             APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$CANDIDATE" '.[$a].app_name // empty')
-            [ "$PR_AUTHOR" = "${APP_NAME}[bot]" ] && { AGENT_NAME="$CANDIDATE"; break; }
+            [ "$PR_AUTHOR" = "${APP_NAME}[bot]" ] && { add_recipient "$CANDIDATE"; break; }
           done
-          [ -z "$AGENT_NAME" ] && {
-            echo "PR #${PR_NUMBER} author '${PR_AUTHOR}' not a registered agent; skipping (review-state events only route to agent-authored PRs)";
-            exit 0;
-          }
+
+          # #57: also route to every registered agent @mentioned in the
+          # review BODY. Mirrors route-by-mention's code-context strip +
+          # fixed-string match exactly (groundnuty/macf-actions#33 +
+          # #13 ReDoS-safety rationale — see that job for the full
+          # write-up). $REVIEW_BODY is passed via env (not interpolated
+          # into run:), so arbitrary reviewer-controlled content is safe.
+          BODY_CLEAN=$(printf '%s' "${REVIEW_BODY:-}" | awk '
+            /^```/ { inside_fence = !inside_fence; next }
+            inside_fence { next }
+            { print }
+          ' | sed -E 's/`[^`]*`//g')
+
+          for CANDIDATE in $(echo "$AGENTS" | jq -r 'keys[]'); do
+            APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$CANDIDATE" '.[$a].app_name // empty')
+            if printf '%s' "$BODY_CLEAN" | grep -qF -e "@${CANDIDATE}[bot]" -e "@${APP_NAME}[bot]"; then
+              add_recipient "$CANDIDATE"
+            fi
+          done
+
+          if [ -z "$RECIPIENTS" ]; then
+            echo "PR #${PR_NUMBER} author '${PR_AUTHOR}' not a registered agent and no registered agent mentioned in review body; skipping (review-state events only route to registered agents)"
+            echo "notified=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           # Reviewer identity is informational (rendered in the
           # notification surface) but not required to be a registered
           # agent. Reviewers can be any GitHub identity.
-
-          # Same inline-lookup justification as route-by-mention /
-          # route-by-ci-completion: loop-driven path uses the same
-          # transform as .github/actions/resolve-agent-endpoint
-          # (test/resolve-agent-endpoint-transform.sh).
-          AGENT_SEG=$(printf '%s' "$AGENT_NAME" | tr '[:lower:]-' '[:upper:]_')
-          VAR_NAME="${PROJECT_SEG}_AGENT_${AGENT_SEG}"
-
-          set +e
-          ENTRY=$(GH_TOKEN="$REG_TOKEN" gh api "${REG_PATH}/actions/variables/${VAR_NAME}" --jq '.value' 2>/dev/null)
-          API_RC=$?
-          set -e
-          if [ "$API_RC" -ne 0 ] || [ -z "$ENTRY" ]; then
-            echo "Registry miss for ${AGENT_NAME} (${VAR_NAME}); skipping pr_review_state route"
-            exit 0
-          fi
-          HOST=$(echo "$ENTRY" | jq -r '.host // empty')
-          PORT=$(echo "$ENTRY" | jq -r '.port // empty')
-          if [ -z "$HOST" ] || [ -z "$PORT" ]; then
-            echo "Registry entry ${VAR_NAME} missing host or port; skipping" >&2
-            exit 0
-          fi
 
           TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
           [ -z "${PROJECT_CA_CERT:-}" ] && { echo "CA-cert var empty — check <PROJECT>_CA_CERT is set" >&2; exit 1; }
@@ -754,40 +889,76 @@ jobs:
           echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
           chmod 600 "$TMPDIR/k.pem"
 
-          # Build PrReviewStatePayloadSchema-conformant payload (per
-          # @groundnuty/macf-core v0.2.7+; receivers on older versions
-          # HTTP-400-reject without harm to other notification types —
-          # backward-compat protected by the schema's wider acceptance
-          # path on NotifyPayloadSchema).
-          PAYLOAD=$(jq -n \
-            --arg type "pr_review_state" \
-            --arg review_state "$REVIEW_STATE" \
-            --arg reviewer_login "$REVIEWER_LOGIN" \
-            --argjson pr_number "$PR_NUMBER" \
-            --arg pr_url "$PR_URL" \
-            --arg review_url "$REVIEW_URL" \
-            '{type: $type, review_state: $review_state, reviewer_login: $reviewer_login, pr_number: $pr_number, pr_url: $pr_url, review_url: $review_url}')
+          NOTIFIED=""
+          for AGENT_NAME in $RECIPIENTS; do
+            # Same inline-lookup justification as route-by-mention /
+            # route-by-ci-completion: loop-driven path uses the same
+            # transform as .github/actions/resolve-agent-endpoint
+            # (test/resolve-agent-endpoint-transform.sh).
+            AGENT_SEG=$(printf '%s' "$AGENT_NAME" | tr '[:lower:]-' '[:upper:]_')
+            VAR_NAME="${PROJECT_SEG}_AGENT_${AGENT_SEG}"
 
-          set +e
-          HTTP_CODE=$(curl --silent --show-error \
-            --cacert "$TMPDIR/ca.pem" --cert "$TMPDIR/c.pem" --key "$TMPDIR/k.pem" \
-            --max-time 30 -X POST "https://${HOST}:${PORT}/notify" \
-            -H 'Content-Type: application/json' -d "$PAYLOAD" \
-            -o "$TMPDIR/r.txt" -w '%{http_code}')
-          CURL_RC=$?
-          set -e
+            set +e
+            ENTRY=$(GH_TOKEN="$REG_TOKEN" gh api "${REG_PATH}/actions/variables/${VAR_NAME}" --jq '.value' 2>/dev/null)
+            API_RC=$?
+            set -e
+            if [ "$API_RC" -ne 0 ] || [ -z "$ENTRY" ]; then
+              echo "Registry miss for ${AGENT_NAME} (${VAR_NAME}); skipping pr_review_state route"
+              continue
+            fi
+            HOST=$(echo "$ENTRY" | jq -r '.host // empty')
+            PORT=$(echo "$ENTRY" | jq -r '.port // empty')
+            if [ -z "$HOST" ] || [ -z "$PORT" ]; then
+              echo "Registry entry ${VAR_NAME} missing host or port; skipping" >&2
+              continue
+            fi
 
-          if [ "$CURL_RC" -eq 0 ] && [ "$HTTP_CODE" = "200" ]; then
-            echo "Routed pr_review_state (${REVIEW_STATE}) on PR #${PR_NUMBER} to ${AGENT_NAME} via mTLS"
-          elif [ "$HTTP_CODE" = "400" ]; then
-            # Receiver-version-skew: receiver is on @groundnuty/macf-core
-            # < v0.2.7 (no pr_review_state in NotifyTypeSchema). Log +
-            # continue; non-fatal (the gh-driven event is informational,
-            # not a state-mutating step like /sign).
-            echo "Agent ${AGENT_NAME} returned HTTP 400 (likely macf-core < v0.2.7 — pre-pr_review_state schema); skipping"
-          else
-            echo "Agent ${AGENT_NAME} unreachable via mTLS for PR #${PR_NUMBER} review (rc=$CURL_RC HTTP=$HTTP_CODE); skipping (review-state events don't mark agent-offline)"
-          fi
+            # This agent is a confirmed recipient of pr_review_state for
+            # this run — record it BEFORE attempting delivery so #58's
+            # dedup output reflects "who review-state targeted", not "who
+            # it successfully reached" (route-by-mention would hit the
+            # same unreachable host/port anyway; letting it retry buys
+            # nothing and reintroduces the double-notify #58 exists to
+            # prevent).
+            NOTIFIED="${NOTIFIED:+$NOTIFIED }${AGENT_NAME}"
+
+            # Build PrReviewStatePayloadSchema-conformant payload (per
+            # @groundnuty/macf-core v0.2.7+; receivers on older versions
+            # HTTP-400-reject without harm to other notification types —
+            # backward-compat protected by the schema's wider acceptance
+            # path on NotifyPayloadSchema).
+            PAYLOAD=$(jq -n \
+              --arg type "pr_review_state" \
+              --arg review_state "$REVIEW_STATE" \
+              --arg reviewer_login "$REVIEWER_LOGIN" \
+              --argjson pr_number "$PR_NUMBER" \
+              --arg pr_url "$PR_URL" \
+              --arg review_url "$REVIEW_URL" \
+              '{type: $type, review_state: $review_state, reviewer_login: $reviewer_login, pr_number: $pr_number, pr_url: $pr_url, review_url: $review_url}')
+
+            set +e
+            HTTP_CODE=$(curl --silent --show-error \
+              --cacert "$TMPDIR/ca.pem" --cert "$TMPDIR/c.pem" --key "$TMPDIR/k.pem" \
+              --max-time 30 -X POST "https://${HOST}:${PORT}/notify" \
+              -H 'Content-Type: application/json' -d "$PAYLOAD" \
+              -o "$TMPDIR/r.txt" -w '%{http_code}')
+            CURL_RC=$?
+            set -e
+
+            if [ "$CURL_RC" -eq 0 ] && [ "$HTTP_CODE" = "200" ]; then
+              echo "Routed pr_review_state (${REVIEW_STATE}) on PR #${PR_NUMBER} to ${AGENT_NAME} via mTLS"
+            elif [ "$HTTP_CODE" = "400" ]; then
+              # Receiver-version-skew: receiver is on @groundnuty/macf-core
+              # < v0.2.7 (no pr_review_state in NotifyTypeSchema). Log +
+              # continue; non-fatal (the gh-driven event is informational,
+              # not a state-mutating step like /sign).
+              echo "Agent ${AGENT_NAME} returned HTTP 400 (likely macf-core < v0.2.7 — pre-pr_review_state schema); skipping"
+            else
+              echo "Agent ${AGENT_NAME} unreachable via mTLS for PR #${PR_NUMBER} review (rc=$CURL_RC HTTP=$HTTP_CODE); skipping (review-state events don't mark agent-offline)"
+            fi
+          done
+
+          echo "notified=${NOTIFIED}" >> "$GITHUB_OUTPUT"
 
   # ─── LABEL CLEANUP ON CLOSE ───
   cleanup-labels:
