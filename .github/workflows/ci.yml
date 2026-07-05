@@ -59,6 +59,22 @@ jobs:
       - name: Run blind-spot lint
         run: ./test/blind-spot-lint.sh
 
+  unit-tests:
+    runs-on: ubuntu-latest
+    # Canonical-vector tests for the embedded-bash logic in agent-router.yml
+    # (code-context strip, endpoint-transform, PR-review recipient-set actor
+    # exclusion). Run via `bash` so they don't depend on the +x bit.
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Run vector tests
+        run: |
+          for t in test/code-context-strip.sh \
+                   test/resolve-agent-endpoint-transform.sh \
+                   test/pr-review-recipient-actor-exclusion.sh; do
+            echo "── $t ──"
+            bash "$t"
+          done
+
   commitlint:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'

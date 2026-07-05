@@ -898,7 +898,30 @@ jobs:
           # exact-token (space-bounded substring), safe regardless of
           # hyphens in agent names.
           RECIPIENTS=""
+
+          # macf-actions#68: resolve the review SUBMITTER (REVIEWER_LOGIN =
+          # github.event.review.user.login) to its registry key so we can
+          # exclude the actor from the recipient set. The macf#62 closure
+          # folds in FORMAL reviewers — which necessarily includes the login
+          # that just submitted THIS review — so without this exclusion the
+          # submitting reviewer self-notifies (an echo of its own review;
+          # verified on groundnuty/icsoc-2026-code-agent PR #15). Skipping at
+          # add_recipient (the single choke-point) covers ALL four sources
+          # (author / body-@mention / formal reviewers / requested reviewers),
+          # including the rare self-review / self-mention-in-review-body cases.
+          # A human/unregistered submitter resolves to "" → guard is inert.
+          REVIEWER_AGENT=""
+          for CANDIDATE in $(echo "$AGENTS" | jq -r 'keys[]'); do
+            APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$CANDIDATE" '.[$a].app_name // empty')
+            if [ -n "$APP_NAME" ] && [ "$REVIEWER_LOGIN" = "${APP_NAME}[bot]" ]; then
+              REVIEWER_AGENT="$CANDIDATE"
+              break
+            fi
+          done
+
           add_recipient() {
+            # #68: never self-notify the reviewer who just submitted this review.
+            [ -n "$REVIEWER_AGENT" ] && [ "$1" = "$REVIEWER_AGENT" ] && return 0
             case " $RECIPIENTS " in
               *" $1 "*) ;; # already present — dedupe (#58 same-recipient case)
               *) RECIPIENTS="${RECIPIENTS:+$RECIPIENTS }$1" ;;
