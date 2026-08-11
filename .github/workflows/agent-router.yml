@@ -31,11 +31,25 @@ name: Agent Router (reusable, v3 — registry-driven mTLS transport)
 #                             installed on the registry org (see §3.0.0
 #                             migration for dedicated-App rationale).
 #     MACF_ROUTING_APP_KEY  — PEM private key for the above App.
-#   vars (on the caller repo, org, or enclosing scope):
-#     <PROJECT_SEG>_CA_CERT — public PEM of the project CA. Name is derived
-#                             from `inputs.project` via toVariableSegment
+#   registry (same source + registry-read token as host/port; primary as
+#   of #66):
+#     <PROJECT_SEG>_CA_CERT — public PEM of the project CA, resolved from
+#                             the MACF registry (DR-005/DR-006/DR-007) via
+#                             the same registry-read token minted for the
+#                             host/port lookup. Name is derived from
+#                             `inputs.project` via toVariableSegment
 #                             (uppercase + hyphen→underscore). Set by
 #                             `macf certs init` at Phase 3 of the deployment.
+#   vars (on the caller repo, org, or enclosing scope) — TRANSITIONAL
+#   fallback only, consulted when the registry lookup misses:
+#     <PROJECT_SEG>_CA_CERT — same name/shape, as a per-repo GitHub Actions
+#                             variable. Pre-#66 primary source; every
+#                             bootstrapped repo was missing this (macf
+#                             certs init writes to the registry, not the
+#                             repo), which was the root cause of the
+#                             groundnuty/macf#799/#806 outage class. Kept
+#                             only so repos mid-migration keep routing;
+#                             set the value in the registry instead.
 #   caller's agent-config.json:
 #     Each agent entry needs `app_name` (used for actor-comparison skip).
 #     Legacy fields carried over from v1.x / v2.x consumers (`host`,
@@ -166,7 +180,10 @@ jobs:
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
-      PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
+      # macf-actions#66: TRANSITIONAL fallback only — the per-repo `vars[...]`
+      # copy of the CA cert. The registry (see the "Resolve project CA cert"
+      # step below) is now the primary source, same as host/port.
+      PROJECT_CA_CERT_REPO_VAR_FALLBACK: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
       ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
       ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -243,6 +260,37 @@ jobs:
           # it as a subset-request and 422'd with "permissions not
           # granted to this installation". See groundnuty/macf-actions#20.
 
+      - name: Resolve project CA cert (registry primary, repo-var fallback)
+        id: ca-cert
+        if: steps.gate.outputs.skip != 'true'
+        # macf-actions#66: the CA cert is now resolved from the REGISTRY —
+        # the same source + registry-read token minted just above for
+        # host/port — instead of the per-repo `vars[...]` copy. `macf certs
+        # init` writes `<PROJECT_SEG>_CA_CERT` into the registry, not onto
+        # every caller repo, so the old vars[...] lookup was empty on every
+        # freshly-bootstrapped fleet (groundnuty/macf#799/#806 outage
+        # class). Precedence: registry wins when present; the per-repo var
+        # (PROJECT_CA_CERT_REPO_VAR_FALLBACK, job env above) is read only
+        # on a registry miss, for repos mid-migration; both-empty fails
+        # loud so a misconfigured repo can't silently skip mTLS routing.
+        env:
+          GH_TOKEN: ${{ steps.registry-token.outputs.token }}
+          REG_PATH: ${{ inputs.registry-api-path }}
+        run: |
+          set -euo pipefail
+          CA_PATH=$(mktemp "${RUNNER_TEMP}/project-ca.XXXXXX.pem")
+          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>/dev/null) && [ -n "$REGISTRY_CA" ]; then
+            printf '%s' "$REGISTRY_CA" > "$CA_PATH"
+            echo "CA cert resolved from registry (${PROJECT_SEG}_CA_CERT)"
+          elif [ -n "${PROJECT_CA_CERT_REPO_VAR_FALLBACK:-}" ]; then
+            printf '%s' "$PROJECT_CA_CERT_REPO_VAR_FALLBACK" > "$CA_PATH"
+            echo "::warning::CA cert resolved from the transitional per-repo vars[${PROJECT_SEG}_CA_CERT] fallback (registry miss). Set it in the registry via 'macf certs init' to close this gap — see macf-actions#66."
+          else
+            echo "::error::CA cert not found in the registry (${PROJECT_SEG}_CA_CERT under ${REG_PATH}) and no per-repo vars[${PROJECT_SEG}_CA_CERT] fallback is set. See macf-actions#66." >&2
+            exit 1
+          fi
+          echo "path=${CA_PATH}" >> "$GITHUB_OUTPUT"
+
       - name: Resolve agent endpoint from registry
         id: endpoint
         if: steps.gate.outputs.skip != 'true'
@@ -290,6 +338,7 @@ jobs:
           APP_NAME: ${{ steps.gate.outputs.app-name }}
           HOST: ${{ steps.endpoint.outputs.host }}
           PORT: ${{ steps.endpoint.outputs.port }}
+          CA_CERT_PATH: ${{ steps.ca-cert.outputs.path }}
         run: |
           set -euo pipefail
 
@@ -307,8 +356,7 @@ jobs:
 
           TMPDIR=$(mktemp -d)
           trap 'rm -rf "$TMPDIR"' EXIT
-          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "CA-cert var empty — check <PROJECT>_CA_CERT is set" >&2; exit 1; }
-          printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
+          cp "$CA_CERT_PATH" "$TMPDIR/ca.pem"
           echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
           echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
           chmod 600 "$TMPDIR/k.pem"
@@ -397,7 +445,10 @@ jobs:
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
-      PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
+      # macf-actions#66: TRANSITIONAL fallback only — the per-repo `vars[...]`
+      # copy of the CA cert. The registry (see the "Resolve project CA cert"
+      # step below) is now the primary source, same as host/port.
+      PROJECT_CA_CERT_REPO_VAR_FALLBACK: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
       ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
       ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
@@ -460,6 +511,30 @@ jobs:
           # it as a subset-request and 422'd with "permissions not
           # granted to this installation". See groundnuty/macf-actions#20.
 
+      - name: Resolve project CA cert (registry primary, repo-var fallback)
+        id: ca-cert
+        # macf-actions#66: see route-by-label's identically-named step for
+        # the full rationale — registry primary (same registry-read token
+        # minted above), per-repo vars[...] transitional fallback,
+        # both-empty fails loud (groundnuty/macf#799/#806 outage class).
+        env:
+          GH_TOKEN: ${{ steps.registry-token.outputs.token }}
+          REG_PATH: ${{ inputs.registry-api-path }}
+        run: |
+          set -euo pipefail
+          CA_PATH=$(mktemp "${RUNNER_TEMP}/project-ca.XXXXXX.pem")
+          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>/dev/null) && [ -n "$REGISTRY_CA" ]; then
+            printf '%s' "$REGISTRY_CA" > "$CA_PATH"
+            echo "CA cert resolved from registry (${PROJECT_SEG}_CA_CERT)"
+          elif [ -n "${PROJECT_CA_CERT_REPO_VAR_FALLBACK:-}" ]; then
+            printf '%s' "$PROJECT_CA_CERT_REPO_VAR_FALLBACK" > "$CA_PATH"
+            echo "::warning::CA cert resolved from the transitional per-repo vars[${PROJECT_SEG}_CA_CERT] fallback (registry miss). Set it in the registry via 'macf certs init' to close this gap — see macf-actions#66."
+          else
+            echo "::error::CA cert not found in the registry (${PROJECT_SEG}_CA_CERT under ${REG_PATH}) and no per-repo vars[${PROJECT_SEG}_CA_CERT] fallback is set. See macf-actions#66." >&2
+            exit 1
+          fi
+          echo "path=${CA_PATH}" >> "$GITHUB_OUTPUT"
+
       - name: Route to mentioned agents (mTLS POST)
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -474,6 +549,7 @@ jobs:
           REPO: ${{ github.repository }}
           REG_TOKEN: ${{ steps.registry-token.outputs.token }}
           REG_PATH: ${{ inputs.registry-api-path }}
+          CA_CERT_PATH: ${{ steps.ca-cert.outputs.path }}
         run: |
           set -euo pipefail
 
@@ -513,8 +589,7 @@ jobs:
           ' | sed -E 's/`[^`]*`//g')
 
           TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
-          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "CA-cert var empty — check <PROJECT>_CA_CERT is set" >&2; exit 1; }
-          printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
+          cp "$CA_CERT_PATH" "$TMPDIR/ca.pem"
           echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
           echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
           chmod 600 "$TMPDIR/k.pem"
@@ -605,7 +680,10 @@ jobs:
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
-      PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
+      # macf-actions#66: TRANSITIONAL fallback only — the per-repo `vars[...]`
+      # copy of the CA cert. The registry (see the "Resolve project CA cert"
+      # step below) is now the primary source, same as host/port.
+      PROJECT_CA_CERT_REPO_VAR_FALLBACK: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
       ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
       ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -666,10 +744,35 @@ jobs:
           # it as a subset-request and 422'd with "permissions not
           # granted to this installation". See groundnuty/macf-actions#20.
 
+      - name: Resolve project CA cert (registry primary, repo-var fallback)
+        id: ca-cert
+        # macf-actions#66: see route-by-label's identically-named step for
+        # the full rationale — registry primary (same registry-read token
+        # minted above), per-repo vars[...] transitional fallback,
+        # both-empty fails loud (groundnuty/macf#799/#806 outage class).
+        env:
+          GH_TOKEN: ${{ steps.registry-token.outputs.token }}
+          REG_PATH: ${{ inputs.registry-api-path }}
+        run: |
+          set -euo pipefail
+          CA_PATH=$(mktemp "${RUNNER_TEMP}/project-ca.XXXXXX.pem")
+          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>/dev/null) && [ -n "$REGISTRY_CA" ]; then
+            printf '%s' "$REGISTRY_CA" > "$CA_PATH"
+            echo "CA cert resolved from registry (${PROJECT_SEG}_CA_CERT)"
+          elif [ -n "${PROJECT_CA_CERT_REPO_VAR_FALLBACK:-}" ]; then
+            printf '%s' "$PROJECT_CA_CERT_REPO_VAR_FALLBACK" > "$CA_PATH"
+            echo "::warning::CA cert resolved from the transitional per-repo vars[${PROJECT_SEG}_CA_CERT] fallback (registry miss). Set it in the registry via 'macf certs init' to close this gap — see macf-actions#66."
+          else
+            echo "::error::CA cert not found in the registry (${PROJECT_SEG}_CA_CERT under ${REG_PATH}) and no per-repo vars[${PROJECT_SEG}_CA_CERT] fallback is set. See macf-actions#66." >&2
+            exit 1
+          fi
+          echo "path=${CA_PATH}" >> "$GITHUB_OUTPUT"
+
       - name: Route CI completion to agent-authored PRs (mTLS POST)
         env:
           REG_TOKEN: ${{ steps.registry-token.outputs.token }}
           REG_PATH: ${{ inputs.registry-api-path }}
+          CA_CERT_PATH: ${{ steps.ca-cert.outputs.path }}
         run: |
           set -euo pipefail
 
@@ -682,8 +785,7 @@ jobs:
           [ -z "$PR_NUMBERS" ] && { echo "No PR for SHA ${CHECK_SUITE_HEAD_SHA}; skipping"; exit 0; }
 
           TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
-          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "CA-cert var empty — check <PROJECT>_CA_CERT is set" >&2; exit 1; }
-          printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
+          cp "$CA_CERT_PATH" "$TMPDIR/ca.pem"
           echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
           echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
           chmod 600 "$TMPDIR/k.pem"
@@ -824,7 +926,10 @@ jobs:
       notified: ${{ steps.route.outputs.notified }}
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
-      PROJECT_CA_CERT: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
+      # macf-actions#66: TRANSITIONAL fallback only — the per-repo `vars[...]`
+      # copy of the CA cert. The registry (see the "Resolve project CA cert"
+      # step below) is now the primary source, same as host/port.
+      PROJECT_CA_CERT_REPO_VAR_FALLBACK: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
       ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
       ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -877,11 +982,36 @@ jobs:
           private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
           owner: ${{ github.repository_owner }}
 
+      - name: Resolve project CA cert (registry primary, repo-var fallback)
+        id: ca-cert
+        # macf-actions#66: see route-by-label's identically-named step for
+        # the full rationale — registry primary (same registry-read token
+        # minted above), per-repo vars[...] transitional fallback,
+        # both-empty fails loud (groundnuty/macf#799/#806 outage class).
+        env:
+          GH_TOKEN: ${{ steps.registry-token.outputs.token }}
+          REG_PATH: ${{ inputs.registry-api-path }}
+        run: |
+          set -euo pipefail
+          CA_PATH=$(mktemp "${RUNNER_TEMP}/project-ca.XXXXXX.pem")
+          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>/dev/null) && [ -n "$REGISTRY_CA" ]; then
+            printf '%s' "$REGISTRY_CA" > "$CA_PATH"
+            echo "CA cert resolved from registry (${PROJECT_SEG}_CA_CERT)"
+          elif [ -n "${PROJECT_CA_CERT_REPO_VAR_FALLBACK:-}" ]; then
+            printf '%s' "$PROJECT_CA_CERT_REPO_VAR_FALLBACK" > "$CA_PATH"
+            echo "::warning::CA cert resolved from the transitional per-repo vars[${PROJECT_SEG}_CA_CERT] fallback (registry miss). Set it in the registry via 'macf certs init' to close this gap — see macf-actions#66."
+          else
+            echo "::error::CA cert not found in the registry (${PROJECT_SEG}_CA_CERT under ${REG_PATH}) and no per-repo vars[${PROJECT_SEG}_CA_CERT] fallback is set. See macf-actions#66." >&2
+            exit 1
+          fi
+          echo "path=${CA_PATH}" >> "$GITHUB_OUTPUT"
+
       - name: Route PR review state to the deliberate-review-engagement set (mTLS POST)
         id: route
         env:
           REG_TOKEN: ${{ steps.registry-token.outputs.token }}
           REG_PATH: ${{ inputs.registry-api-path }}
+          CA_CERT_PATH: ${{ steps.ca-cert.outputs.path }}
         run: |
           set -euo pipefail
           set -f  # macf#56: disable globbing — reviewer/requested logins contain `[bot]`; the unquoted `for login in $…_LOGINS` loops below must not glob-expand it
@@ -1010,8 +1140,7 @@ jobs:
           # agent. Reviewers can be any GitHub identity.
 
           TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
-          [ -z "${PROJECT_CA_CERT:-}" ] && { echo "CA-cert var empty — check <PROJECT>_CA_CERT is set" >&2; exit 1; }
-          printf '%s' "$PROJECT_CA_CERT" > "$TMPDIR/ca.pem"
+          cp "$CA_CERT_PATH" "$TMPDIR/ca.pem"
           echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
           echo "$ROUTING_CLIENT_KEY"  | base64 -d > "$TMPDIR/k.pem"
           chmod 600 "$TMPDIR/k.pem"
