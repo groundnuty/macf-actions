@@ -103,10 +103,17 @@ on:
       # can proceed with nothing — every route-by-* job's first step
       # ("Resolve routing secrets") fails the job loudly, naming exactly
       # which secret(s) are missing, if neither a valid bundle nor a
-      # complete six resolves. Declaring `required: true` here would only
-      # catch "caller's secrets: block omits the name entirely" (a YAML
-      # authoring mistake) — it can't express "either this OR those six,
-      # together," so that invariant is enforced in shell instead, at the
+      # complete six resolves — EXCEPT TS_OAUTH_CLIENT_ID/TS_OAUTH_SECRET,
+      # which the fallback path only requires when this run will actually
+      # attempt a Tailscale connect (TAILNET_NEEDED — see each job's own
+      # "Resolve routing secrets" step doc). A fleet routing exclusively
+      # via the self-hosted `macf-vm` runner (already tailnet-joined,
+      # #64) never consumes those two, and requiring them anyway would
+      # have broken every such fleet's routing on upgrade. Declaring
+      # `required: true` here would only catch "caller's secrets: block
+      # omits the name entirely" (a YAML authoring mistake) — it can't
+      # express "either this OR those six, together" (nor the Tailscale
+      # carve-out), so that invariant is enforced in shell instead, at the
       # one place that already needs to inspect both sources.
       MACF_ROUTING_BUNDLE:
         description: >-

@@ -75,6 +75,8 @@ Configure these in your repo's **Settings → Secrets and variables → Actions*
 
 A caller supplying **neither** the bundle nor a complete six fails the job loudly (naming exactly which secret(s) are missing) rather than proceeding on empty values; a caller supplying a **malformed** bundle (bad base64, bad JSON, or missing a key) also fails loudly and does not silently fall back to the six even if those happen to be present too.
 
+**Exception: `TS_OAUTH_CLIENT_ID`/`TS_OAUTH_SECRET` may be omitted if you route exclusively via the self-hosted `macf-vm` runner** (origin-routing, [`#59`](https://github.com/groundnuty/macf-actions/issues/59)) — that runner is already tailnet-joined, so the Tailscale-connect step never runs and these two values are never consumed. They're only genuinely required when a github-hosted (ephemeral) runner will attempt the connect. `MACF_ROUTING_APP_ID`/`MACF_ROUTING_APP_KEY` and `ROUTING_CLIENT_CERT`/`ROUTING_CLIENT_KEY` have no such carve-out — every route-by-* job always needs them (except `MACF_ROUTING_BUNDLE`-only callers, per the preferred form above).
+
 **Variables (→ `Variables` tab, not `Secrets` — these are PUBLIC-readable PEM, not private):**
 
 | Variable | Purpose |
