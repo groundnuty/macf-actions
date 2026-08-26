@@ -239,6 +239,43 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
     steps:
+      # groundnuty/macf-actions#1169: Label gate runs FIRST, before any
+      # secret resolution or Tailscale connect — this job (uniquely among
+      # the four route-by-* jobs) has an event class that's a clean no-op
+      # (a non-agent label like `bug`/`docs`, or self-routing): before
+      # #1169 those events never touched routing secrets at all (Mint was
+      # already gated on `steps.gate.outputs.skip`, and on the self-hosted
+      # runner Tailscale-connect was skipped too). Resolving secrets FIRST
+      # (unconditionally, as originally implemented) would turn every
+      # irrelevant-label event into a hard job failure whenever this repo's
+      # routing secrets happen to be incomplete — a regression #1169 must
+      # not introduce. Gating secret-resolution + Tailscale on this step's
+      # `skip` output (below) preserves the pre-#1169 no-op behavior
+      # exactly. The other three route-by-* jobs have no such in-job early
+      # exit, so first-step secret-resolution is correct there unchanged.
+      - name: Label gate (skip non-agent labels + self-routing)
+        id: gate
+        env:
+          EVENT_LABEL: ${{ github.event.label.name }}
+          ACTOR: ${{ github.event.sender.login }}
+        run: |
+          set -euo pipefail
+          LABEL="$EVENT_LABEL"
+          APP_NAME=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].app_name // empty')
+          if [ -z "$APP_NAME" ]; then
+            echo "Label '$LABEL' is not an agent label, skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$ACTOR" = "${APP_NAME}[bot]" ]; then
+            echo "Actor is the same agent, skipping self-routing"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "agent-name=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "app-name=$APP_NAME" >> "$GITHUB_OUTPUT"
+
       # groundnuty/macf-actions#1169: resolves ROUTING_CLIENT_CERT/KEY (and
       # the other four routing secrets) from either MACF_ROUTING_BUNDLE or
       # the legacy six — see that step's own doc for the full contract.
@@ -250,6 +287,7 @@ jobs:
       # to keep straight.
       - name: Resolve routing secrets (prefer MACF_ROUTING_BUNDLE — groundnuty/macf-actions#1169)
         id: resolve-routing-secrets
+        if: steps.gate.outputs.skip != 'true'
         env:
           BUNDLE: ${{ secrets.MACF_ROUTING_BUNDLE }}
           IN_MACF_ROUTING_APP_ID: ${{ secrets.MACF_ROUTING_APP_ID }}
@@ -258,6 +296,14 @@ jobs:
           IN_ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
           IN_TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           IN_TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          # A fleet that hasn't declared Tailscale (apply-routing-secrets.ts's
+          # 'not-required' leg — transport.tailscale_oauth_required defaults
+          # to false, so this is the COMMON case) never gets TS_OAUTH_*
+          # published as repo secrets. On the self-hosted `macf-vm` runner
+          # (already tailnet-joined, macf-actions#64) that's fine — Connect
+          # to Tailscale below never runs, so the fallback branch must not
+          # require TS_OAUTH_* when this run won't actually consume it.
+          TAILNET_NEEDED: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: |
           set -euo pipefail
 
@@ -353,6 +399,17 @@ jobs:
                 TS_OAUTH_SECRET)      VALUE="${IN_TS_OAUTH_SECRET:-}" ;;
               esac
               if [ -z "$VALUE" ]; then
+                # TS_OAUTH_* is legitimately absent on a fleet that hasn't
+                # declared Tailscale (the COMMON case — see this step's
+                # `env:` doc for TAILNET_NEEDED). Only fail on a missing
+                # TS_OAUTH_* when this run will actually attempt the
+                # Tailscale connect; MACF_ROUTING_APP_ID/KEY and
+                # ROUTING_CLIENT_CERT/KEY have no such carve-out.
+                if { [ "$NAME" = "TS_OAUTH_CLIENT_ID" ] || [ "$NAME" = "TS_OAUTH_SECRET" ]; } \
+                  && [ "${TAILNET_NEEDED:-true}" != "true" ]; then
+                  echo "routing secrets: $NAME not supplied and not needed this run (self-hosted runner skips Tailscale connect) — leaving unset"
+                  continue
+                fi
                 MISSING="${MISSING:+$MISSING, }$NAME"
                 continue
               fi
@@ -376,8 +433,14 @@ jobs:
       # `fromJSON()` at this job's `runs-on:`), holding either the literal
       # string `"ubuntu-latest"` or `["self-hosted","macf-vm"]`; `contains()`
       # does a substring match against that raw string.
+      #
+      # groundnuty/macf-actions#1169: ALSO gated on `steps.gate.outputs.skip
+      # != 'true'` (new) — an irrelevant-label / self-routing event must
+      # stay a clean no-op, matching the pre-#1169 shape where this job
+      # never touched Tailscale/secrets for such events on the self-hosted
+      # path. `gate` runs first in this job specifically for this reason.
       - name: Connect to Tailscale
-        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
+        if: ${{ steps.gate.outputs.skip != 'true' && !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         uses: tailscale/github-action@v3
         with:
           oauth-client-id: ${{ env.TS_OAUTH_CLIENT_ID }}
@@ -385,7 +448,7 @@ jobs:
           tags: tag:ci-runner
 
       - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
-        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
+        if: ${{ steps.gate.outputs.skip != 'true' && !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: |
           tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null \
             || { echo "::error::tailnet did not come up — BackendState != Running.";
@@ -394,31 +457,8 @@ jobs:
           echo "✓ tailnet up (BackendState=Running)"
 
       - name: Wait for Tailscale network
-        if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
+        if: ${{ steps.gate.outputs.skip != 'true' && !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: sleep 10
-
-      - name: Label gate (skip non-agent labels + self-routing)
-        id: gate
-        env:
-          EVENT_LABEL: ${{ github.event.label.name }}
-          ACTOR: ${{ github.event.sender.login }}
-        run: |
-          set -euo pipefail
-          LABEL="$EVENT_LABEL"
-          APP_NAME=$(echo "$AGENTS" | jq -r --arg l "$LABEL" '.[$l].app_name // empty')
-          if [ -z "$APP_NAME" ]; then
-            echo "Label '$LABEL' is not an agent label, skipping"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$ACTOR" = "${APP_NAME}[bot]" ]; then
-            echo "Actor is the same agent, skipping self-routing"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "agent-name=$LABEL" >> "$GITHUB_OUTPUT"
-          echo "app-name=$APP_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Mint registry-read token
         id: registry-token
@@ -657,6 +697,14 @@ jobs:
           IN_ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
           IN_TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           IN_TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          # A fleet that hasn't declared Tailscale (apply-routing-secrets.ts's
+          # 'not-required' leg — transport.tailscale_oauth_required defaults
+          # to false, so this is the COMMON case) never gets TS_OAUTH_*
+          # published as repo secrets. On the self-hosted `macf-vm` runner
+          # (already tailnet-joined, macf-actions#64) that's fine — Connect
+          # to Tailscale below never runs, so the fallback branch must not
+          # require TS_OAUTH_* when this run won't actually consume it.
+          TAILNET_NEEDED: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: |
           set -euo pipefail
 
@@ -752,6 +800,17 @@ jobs:
                 TS_OAUTH_SECRET)      VALUE="${IN_TS_OAUTH_SECRET:-}" ;;
               esac
               if [ -z "$VALUE" ]; then
+                # TS_OAUTH_* is legitimately absent on a fleet that hasn't
+                # declared Tailscale (the COMMON case — see this step's
+                # `env:` doc for TAILNET_NEEDED). Only fail on a missing
+                # TS_OAUTH_* when this run will actually attempt the
+                # Tailscale connect; MACF_ROUTING_APP_ID/KEY and
+                # ROUTING_CLIENT_CERT/KEY have no such carve-out.
+                if { [ "$NAME" = "TS_OAUTH_CLIENT_ID" ] || [ "$NAME" = "TS_OAUTH_SECRET" ]; } \
+                  && [ "${TAILNET_NEEDED:-true}" != "true" ]; then
+                  echo "routing secrets: $NAME not supplied and not needed this run (self-hosted runner skips Tailscale connect) — leaving unset"
+                  continue
+                fi
                 MISSING="${MISSING:+$MISSING, }$NAME"
                 continue
               fi
@@ -1015,6 +1074,14 @@ jobs:
           IN_ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
           IN_TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           IN_TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          # A fleet that hasn't declared Tailscale (apply-routing-secrets.ts's
+          # 'not-required' leg — transport.tailscale_oauth_required defaults
+          # to false, so this is the COMMON case) never gets TS_OAUTH_*
+          # published as repo secrets. On the self-hosted `macf-vm` runner
+          # (already tailnet-joined, macf-actions#64) that's fine — Connect
+          # to Tailscale below never runs, so the fallback branch must not
+          # require TS_OAUTH_* when this run won't actually consume it.
+          TAILNET_NEEDED: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: |
           set -euo pipefail
 
@@ -1110,6 +1177,17 @@ jobs:
                 TS_OAUTH_SECRET)      VALUE="${IN_TS_OAUTH_SECRET:-}" ;;
               esac
               if [ -z "$VALUE" ]; then
+                # TS_OAUTH_* is legitimately absent on a fleet that hasn't
+                # declared Tailscale (the COMMON case — see this step's
+                # `env:` doc for TAILNET_NEEDED). Only fail on a missing
+                # TS_OAUTH_* when this run will actually attempt the
+                # Tailscale connect; MACF_ROUTING_APP_ID/KEY and
+                # ROUTING_CLIENT_CERT/KEY have no such carve-out.
+                if { [ "$NAME" = "TS_OAUTH_CLIENT_ID" ] || [ "$NAME" = "TS_OAUTH_SECRET" ]; } \
+                  && [ "${TAILNET_NEEDED:-true}" != "true" ]; then
+                  echo "routing secrets: $NAME not supplied and not needed this run (self-hosted runner skips Tailscale connect) — leaving unset"
+                  continue
+                fi
                 MISSING="${MISSING:+$MISSING, }$NAME"
                 continue
               fi
@@ -1384,6 +1462,14 @@ jobs:
           IN_ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
           IN_TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           IN_TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          # A fleet that hasn't declared Tailscale (apply-routing-secrets.ts's
+          # 'not-required' leg — transport.tailscale_oauth_required defaults
+          # to false, so this is the COMMON case) never gets TS_OAUTH_*
+          # published as repo secrets. On the self-hosted `macf-vm` runner
+          # (already tailnet-joined, macf-actions#64) that's fine — Connect
+          # to Tailscale below never runs, so the fallback branch must not
+          # require TS_OAUTH_* when this run won't actually consume it.
+          TAILNET_NEEDED: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         run: |
           set -euo pipefail
 
@@ -1479,6 +1565,17 @@ jobs:
                 TS_OAUTH_SECRET)      VALUE="${IN_TS_OAUTH_SECRET:-}" ;;
               esac
               if [ -z "$VALUE" ]; then
+                # TS_OAUTH_* is legitimately absent on a fleet that hasn't
+                # declared Tailscale (the COMMON case — see this step's
+                # `env:` doc for TAILNET_NEEDED). Only fail on a missing
+                # TS_OAUTH_* when this run will actually attempt the
+                # Tailscale connect; MACF_ROUTING_APP_ID/KEY and
+                # ROUTING_CLIENT_CERT/KEY have no such carve-out.
+                if { [ "$NAME" = "TS_OAUTH_CLIENT_ID" ] || [ "$NAME" = "TS_OAUTH_SECRET" ]; } \
+                  && [ "${TAILNET_NEEDED:-true}" != "true" ]; then
+                  echo "routing secrets: $NAME not supplied and not needed this run (self-hosted runner skips Tailscale connect) — leaving unset"
+                  continue
+                fi
                 MISSING="${MISSING:+$MISSING, }$NAME"
                 continue
               fi

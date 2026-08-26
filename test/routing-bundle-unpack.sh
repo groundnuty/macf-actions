@@ -90,6 +90,26 @@ resolve_routing_secrets() {
         TS_OAUTH_SECRET)      VALUE="${IN_TS_OAUTH_SECRET:-}" ;;
       esac
       if [ -z "$VALUE" ]; then
+        # TS_OAUTH_* is legitimately absent on a fleet that hasn't
+        # declared Tailscale (apply-routing-secrets.ts's `'not-required'`
+        # leg — transport.tailscale_oauth_required defaults to false, so
+        # this is the COMMON case, not an edge case). Such a fleet's
+        # Connect-to-Tailscale step never runs on the self-hosted `macf-vm`
+        # runner (already tailnet-joined, macf-actions#64) — its TS_OAUTH_*
+        # values are never consumed this run. Failing this job for a
+        # secret nothing downstream reads would turn an
+        # already-routing fleet into a hard failure on upgrade — exactly
+        # the regression groundnuty/macf-actions#1169 must not introduce.
+        # Only fail on a missing TS_OAUTH_* when TAILNET_NEEDED says this
+        # run WILL attempt the Tailscale connect (github-hosted runner).
+        # Defaults to "required" (fail-safe) if TAILNET_NEEDED is somehow
+        # unset. MACF_ROUTING_APP_ID/KEY and ROUTING_CLIENT_CERT/KEY have
+        # no such carve-out — every job always needs them.
+        if { [ "$NAME" = "TS_OAUTH_CLIENT_ID" ] || [ "$NAME" = "TS_OAUTH_SECRET" ]; } \
+          && [ "${TAILNET_NEEDED:-true}" != "true" ]; then
+          echo "routing secrets: $NAME not supplied and not needed this run (self-hosted runner skips Tailscale connect) — leaving unset"
+          continue
+        fi
         MISSING="${MISSING:+$MISSING, }$NAME"
         continue
       fi
@@ -243,6 +263,34 @@ check 'malformed bundle does NOT fall back to a complete legacy six' 1 "" \
 check 'partial legacy six (2 of 6), no bundle, fails loudly' 1 "MACF_ROUTING_APP_ID ROUTING_CLIENT_CERT" \
   IN_MACF_ROUTING_APP_ID=999 \
   IN_ROUTING_CLIENT_CERT=Y2VydA==
+
+FOUR_NON_TAILSCALE="MACF_ROUTING_APP_ID MACF_ROUTING_APP_KEY ROUTING_CLIENT_CERT ROUTING_CLIENT_KEY"
+
+# 9. The regression this fix targets: TS_OAUTH_* genuinely absent (fleet
+#    with transport.tailscale_oauth_required=false, apply-routing-secrets.ts's
+#    'not-required' leg — the DEFAULT, not an edge case) AND this run will
+#    NOT attempt a Tailscale connect (self-hosted runner, TAILNET_NEEDED=
+#    false) → succeeds with the four non-Tailscale secrets resolved, TS_OAUTH_*
+#    left unset. Without this carve-out an already-routing self-hosted fleet
+#    would break on upgrade purely because it never had Tailscale secrets to
+#    begin with — the exact backward-compatibility break #1169 must avoid.
+check 'TS_OAUTH_* absent + not needed (self-hosted) → succeeds, four resolved' 0 "$FOUR_NON_TAILSCALE" \
+  TAILNET_NEEDED=false \
+  IN_MACF_ROUTING_APP_ID=999 \
+  IN_MACF_ROUTING_APP_KEY=keydata \
+  IN_ROUTING_CLIENT_CERT=Y2VydA== \
+  IN_ROUTING_CLIENT_KEY=a2V5
+
+# 10. Same absent TS_OAUTH_*, but this run WILL attempt Tailscale connect
+#     (github-hosted fallback runner, TAILNET_NEEDED=true) → fails loudly,
+#     naming exactly the two Tailscale secrets (not all six — the four
+#     present ones are correctly NOT reported as missing).
+check 'TS_OAUTH_* absent + needed (github-hosted) → fails loudly, names only the two' 1 "$FOUR_NON_TAILSCALE" \
+  TAILNET_NEEDED=true \
+  IN_MACF_ROUTING_APP_ID=999 \
+  IN_MACF_ROUTING_APP_KEY=keydata \
+  IN_ROUTING_CLIENT_CERT=Y2VydA== \
+  IN_ROUTING_CLIENT_KEY=a2V5
 
 if [ "$fail" -ne 0 ]; then
   echo "" >&2
