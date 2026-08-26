@@ -4,7 +4,18 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
-(no unreleased changes)
+### Added — becomes v3.5.0 on release (matches `groundnuty/macf`'s `MIN_BUNDLE_CAPABLE_ACTIONS_VERSION` gate)
+
+- **Every `route-by-*` job now accepts `MACF_ROUTING_BUNDLE`** — a single `base64(JSON)` secret bundling the six routing secrets below, keyed by their own names ([groundnuty/macf#1112](https://github.com/groundnuty/macf/issues/1112) / [#1118](https://github.com/groundnuty/macf/pull/1118) / [groundnuty/macf-actions#1169](https://github.com/groundnuty/macf-actions/issues/1169)). A caller supplying the bundle needs no other routing secret, and its generated `secrets:` block never has to change again when this workflow's secret set changes — closing the class of bug where a caller generated before a secret-set change fails with `Secret X is required, but not provided` on a stale caller.
+- **New first step per job, "Resolve routing secrets (prefer MACF_ROUTING_BUNDLE)"**: decodes + validates the bundle, or falls back to the legacy six individually-passed secrets (`ROUTING_CLIENT_CERT`, `ROUTING_CLIENT_KEY`, `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `MACF_ROUTING_APP_ID`, `MACF_ROUTING_APP_KEY`) when the bundle is absent. Additive, never a replacement — a **malformed** (present-but-unreadable) bundle fails the job loudly, naming what's wrong, and never silently falls through to the six even when those happen to be present too. A caller supplying **neither** form fails loudly, naming exactly which secret(s) are missing — never a partial run on GitHub Actions' empty-string-for-missing-secret substitution (`silent-fallback-hazards.md` Pattern D).
+- All six legacy secrets relax from `required: true` to `required: false` at the `workflow_call` level, so a bundle-only caller's `secrets:` block doesn't need to enumerate them. The `required: false` declaration only catches "caller's `secrets:` block omits the name" — the actual "bundle OR complete six" invariant is enforced in the new resolve step, the one place that already needs to inspect both sources.
+- Every resolved secret value is masked (`::add-mask::`, applied **per line** — a single call on a multi-line value like `MACF_ROUTING_APP_KEY`'s raw PEM does not reliably redact it from logs, [actions/runner#475](https://github.com/actions/runner/issues/475)) before being written to `$GITHUB_ENV` behind a random per-call delimiter.
+- New `test/routing-bundle-unpack.sh` canonical-vector test (wired into `ci.yml`'s `unit-tests` job) — 8 cases covering both success paths (bundle-only, legacy-six-only) and 6 failure shapes (neither supplied, malformed base64, non-object JSON, partial bundle, malformed-bundle-does-not-fall-back-to-a-complete-six, partial legacy six).
+- `README.md` "Required secrets (v3)" section documents the bundle as the preferred form, with the legacy six retained as the fallback.
+
+### Unchanged (consumer migration not required)
+
+Consumers who only `uses: .../agent-router.yml@v3` or `@v3.<minor>` and pass the six secrets individually (or `secrets: inherit` within the same org/enterprise) continue to work unchanged — the bundle is purely additive. No caller action is required to keep routing working; adopting the bundle is opt-in via `macf repo-init` regenerating the caller workflow once both `macf` and `macf-actions` are on bundle-capable versions.
 
 ## [3.2.0] — 2026-04-25
 

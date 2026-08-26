@@ -22,7 +22,18 @@ name: Agent Router (reusable, v3 — registry-driven mTLS transport)
 #                             (omit trailing /actions/variables). Covers
 #                             all three DR-006 scopes: org, profile, repo.
 #                             Optional; defaults to `/orgs/<caller-owner>`.
-#   secrets:
+#   secrets (groundnuty/macf-actions#1169 — either form works; bundle
+#   preferred, six-secret form kept for backward compatibility):
+#     MACF_ROUTING_BUNDLE   — PREFERRED. base64(JSON) of the six values
+#                             below, keyed by their own secret names
+#                             (groundnuty/macf#1112/#1118,
+#                             apply-routing-secrets.ts::packRoutingBundle).
+#                             A bundle-supplying caller needs no other
+#                             routing secret and never has to regenerate
+#                             when this workflow's secret set changes.
+#                             Every route-by-* job's first step unpacks it
+#                             (or falls back to the six below if absent) —
+#                             see "Resolve routing secrets" in each job.
 #     ROUTING_CLIENT_CERT   — base64 PEM, minted via `macf certs issue-routing-client`
 #     ROUTING_CLIENT_KEY    — base64 PEM, ditto
 #     TS_OAUTH_CLIENT_ID    — Tailscale OAuth client ID (runner → agent VM)
@@ -31,6 +42,15 @@ name: Agent Router (reusable, v3 — registry-driven mTLS transport)
 #                             installed on the registry org (see §3.0.0
 #                             migration for dedicated-App rationale).
 #     MACF_ROUTING_APP_KEY  — PEM private key for the above App.
+#     All six above are declared `required: false` at the workflow_call
+#     level so a bundle-only caller's `secrets:` block doesn't have to
+#     enumerate them — but a caller supplying NEITHER the bundle NOR a
+#     complete six fails loudly at job start (named per missing secret),
+#     never a partial run on empty values. A caller supplying a BUNDLE
+#     that is present-but-malformed (bad base64, bad JSON, or missing a
+#     key) also fails loudly — it never silently falls back to the six
+#     even if those happen to be present too, so a bundle-packing bug
+#     can't hide behind a coincidental fallback.
 #   registry (same source + registry-read token as host/port; primary as
 #   of #66):
 #     <PROJECT_SEG>_CA_CERT — public PEM of the project CA, resolved from
@@ -76,26 +96,58 @@ on:
         required: false
         default: /orgs/${{ github.repository_owner }}
     secrets:
+      # groundnuty/macf-actions#1169: all seven below are `required: false`
+      # at the workflow_call level so BOTH forms are structurally optional
+      # (a bundle-only caller's `secrets:` block need not enumerate the six;
+      # a legacy caller need not add the bundle). This does NOT mean a run
+      # can proceed with nothing — every route-by-* job's first step
+      # ("Resolve routing secrets") fails the job loudly, naming exactly
+      # which secret(s) are missing, if neither a valid bundle nor a
+      # complete six resolves. Declaring `required: true` here would only
+      # catch "caller's secrets: block omits the name entirely" (a YAML
+      # authoring mistake) — it can't express "either this OR those six,
+      # together," so that invariant is enforced in shell instead, at the
+      # one place that already needs to inspect both sources.
+      MACF_ROUTING_BUNDLE:
+        description: >-
+          Preferred. base64(JSON) of the six routing secrets below, keyed
+          by their own names (groundnuty/macf#1112/#1118). A caller
+          supplying this needs no other routing secret and never has to
+          regenerate its caller workflow when this reusable's secret set
+          changes.
+        required: false
       ROUTING_CLIENT_CERT:
-        description: Base64 PEM of the routing-action client certificate
-        required: true
+        description: >-
+          Base64 PEM of the routing-action client certificate. Legacy
+          form — used when MACF_ROUTING_BUNDLE is not supplied.
+        required: false
       ROUTING_CLIENT_KEY:
-        description: Base64 PEM of the routing-action client private key
-        required: true
+        description: >-
+          Base64 PEM of the routing-action client private key. Legacy
+          form — used when MACF_ROUTING_BUNDLE is not supplied.
+        required: false
       TS_OAUTH_CLIENT_ID:
-        description: Tailscale OAuth client ID for the GHA runner
-        required: true
+        description: >-
+          Tailscale OAuth client ID for the GHA runner. Legacy form —
+          used when MACF_ROUTING_BUNDLE is not supplied.
+        required: false
       TS_OAUTH_SECRET:
-        description: Tailscale OAuth secret for the GHA runner
-        required: true
+        description: >-
+          Tailscale OAuth secret for the GHA runner. Legacy form — used
+          when MACF_ROUTING_BUNDLE is not supplied.
+        required: false
       MACF_ROUTING_APP_ID:
         description: >-
-          GitHub App ID for the variables:read-only App that mints registry
-          access tokens. Dedicated App keeps blast radius small.
-        required: true
+          GitHub App ID for the variables:read-only App that mints
+          registry access tokens (dedicated App keeps blast radius
+          small). Legacy form — used when MACF_ROUTING_BUNDLE is not
+          supplied.
+        required: false
       MACF_ROUTING_APP_KEY:
-        description: PEM private key for the MACF_ROUTING App
-        required: true
+        description: >-
+          PEM private key for the MACF_ROUTING App. Legacy form — used
+          when MACF_ROUTING_BUNDLE is not supplied.
+        required: false
 
 permissions:
   contents: read
@@ -184,11 +236,135 @@ jobs:
       # copy of the CA cert. The registry (see the "Resolve project CA cert"
       # step below) is now the primary source, same as host/port.
       PROJECT_CA_CERT_REPO_VAR_FALLBACK: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
-      ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
-      ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
     steps:
+      # groundnuty/macf-actions#1169: resolves ROUTING_CLIENT_CERT/KEY (and
+      # the other four routing secrets) from either MACF_ROUTING_BUNDLE or
+      # the legacy six — see that step's own doc for the full contract.
+      # Deliberately NOT in this job's `env:` block above (unlike the
+      # pre-#1169 shape): a job-level `env: ROUTING_CLIENT_CERT: ${{
+      # secrets.ROUTING_CLIENT_CERT }}` would just be an empty string for a
+      # bundle-only caller, and this step's $GITHUB_ENV write is the ONLY
+      # source of truth for these names in this job — no double-definition
+      # to keep straight.
+      - name: Resolve routing secrets (prefer MACF_ROUTING_BUNDLE — groundnuty/macf-actions#1169)
+        id: resolve-routing-secrets
+        env:
+          BUNDLE: ${{ secrets.MACF_ROUTING_BUNDLE }}
+          IN_MACF_ROUTING_APP_ID: ${{ secrets.MACF_ROUTING_APP_ID }}
+          IN_MACF_ROUTING_APP_KEY: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          IN_ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
+          IN_ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
+          IN_TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          IN_TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+        run: |
+          set -euo pipefail
+
+          # groundnuty/macf#1169 / groundnuty/macf-actions#1169: a caller
+          # generated by macf#1118+ passes ONE secret, MACF_ROUTING_BUNDLE
+          # (base64(JSON) of these same six values, keyed by their own
+          # secret names — apply-routing-secrets.ts::packRoutingBundle).
+          # A legacy caller passes the six individually via
+          # `secrets: inherit` or explicit listing. This step is the ONE
+          # place that decides which source feeds every LATER step in
+          # this job (they read the six under their original names,
+          # either as a plain OS env var in `run:` steps, or via
+          # `${{ env.NAME }}` in a `uses:` step's `with:` block).
+          #
+          # Additive, never a replacement: the bundle wins whenever the
+          # caller supplied it (a present-but-malformed bundle fails
+          # LOUD here rather than silently falling back to the six, even
+          # if those happen to be present too — a bundle-packing bug
+          # must never hide behind a coincidental fallback). The six are
+          # the fallback ONLY when the caller supplied no bundle at all.
+          # A caller supplying NEITHER fails loudly, naming exactly which
+          # secret(s) are missing, before Tailscale connect or the
+          # App-token mint ever run — never a partial run on empty
+          # secrets (silent-fallback-hazards.md Pattern D: GitHub
+          # substitutes empty string for an unsupplied secret, and an
+          # empty-string routing secret must never be handed to curl/
+          # create-github-app-token as if it were real).
+          #
+          # Never echoes a secret value — only names/counts appear in any
+          # echo or ::error:: below. Every extracted value is masked
+          # (line-by-line — GitHub's ::add-mask:: does not reliably
+          # redact a value containing embedded newlines, and
+          # MACF_ROUTING_APP_KEY is raw multi-line PEM; see
+          # actions/runner#475) BEFORE it is written to $GITHUB_ENV.
+
+          NAMES="MACF_ROUTING_APP_ID MACF_ROUTING_APP_KEY ROUTING_CLIENT_CERT ROUTING_CLIENT_KEY TS_OAUTH_CLIENT_ID TS_OAUTH_SECRET"
+
+          emit_secret() {
+            # $1=name $2=value. Masks every line of $2 individually (a
+            # single ::add-mask:: call on a multi-line string does not
+            # reliably mask it — GH's masking is word/line-delimited),
+            # then writes NAME to $GITHUB_ENV behind a random per-call
+            # delimiter (GitHub's documented multiline-value pattern) so
+            # a PEM value's own content can never collide with the
+            # heredoc terminator.
+            local name="$1" value="$2" delim line
+            while IFS= read -r line || [ -n "$line" ]; do
+              [ -n "$line" ] && echo "::add-mask::${line}"
+            done <<< "$value"
+            delim="ROUTING_SECRET_EOF_${name}_${RANDOM}${RANDOM}_$$"
+            {
+              echo "${name}<<${delim}"
+              printf '%s\n' "$value"
+              echo "$delim"
+            } >> "$GITHUB_ENV"
+          }
+
+          if [ -n "${BUNDLE:-}" ]; then
+            echo "routing secrets: MACF_ROUTING_BUNDLE supplied — bundle mode"
+            if ! DECODED=$(printf '%s' "$BUNDLE" | base64 -d 2>/dev/null); then
+              echo "::error::MACF_ROUTING_BUNDLE is not valid base64 — refusing to route on an unreadable bundle"
+              exit 1
+            fi
+            if ! printf '%s' "$DECODED" | jq -e 'type == "object"' >/dev/null 2>&1; then
+              echo "::error::MACF_ROUTING_BUNDLE decoded but is not a JSON object — refusing to route on a malformed bundle"
+              exit 1
+            fi
+            MISSING=""
+            for NAME in $NAMES; do
+              VALUE=$(printf '%s' "$DECODED" | jq -r --arg k "$NAME" '.[$k] // empty')
+              if [ -z "$VALUE" ]; then
+                MISSING="${MISSING:+$MISSING, }$NAME"
+                continue
+              fi
+              emit_secret "$NAME" "$VALUE"
+            done
+            unset DECODED
+            if [ -n "$MISSING" ]; then
+              echo "::error::MACF_ROUTING_BUNDLE is missing required key(s): $MISSING — refusing to route on a partial bundle"
+              exit 1
+            fi
+            echo "routing secrets: unpacked all six values from MACF_ROUTING_BUNDLE"
+          else
+            echo "routing secrets: MACF_ROUTING_BUNDLE not supplied — falling back to the six individual secrets"
+            MISSING=""
+            for NAME in $NAMES; do
+              case "$NAME" in
+                MACF_ROUTING_APP_ID)  VALUE="${IN_MACF_ROUTING_APP_ID:-}" ;;
+                MACF_ROUTING_APP_KEY) VALUE="${IN_MACF_ROUTING_APP_KEY:-}" ;;
+                ROUTING_CLIENT_CERT)  VALUE="${IN_ROUTING_CLIENT_CERT:-}" ;;
+                ROUTING_CLIENT_KEY)   VALUE="${IN_ROUTING_CLIENT_KEY:-}" ;;
+                TS_OAUTH_CLIENT_ID)   VALUE="${IN_TS_OAUTH_CLIENT_ID:-}" ;;
+                TS_OAUTH_SECRET)      VALUE="${IN_TS_OAUTH_SECRET:-}" ;;
+              esac
+              if [ -z "$VALUE" ]; then
+                MISSING="${MISSING:+$MISSING, }$NAME"
+                continue
+              fi
+              emit_secret "$NAME" "$VALUE"
+            done
+            if [ -n "$MISSING" ]; then
+              echo "::error::Neither MACF_ROUTING_BUNDLE nor the following individual routing secret(s) were supplied: $MISSING — this caller cannot route. Pass MACF_ROUTING_BUNDLE (preferred, groundnuty/macf#1112) or all six secrets individually."
+              exit 1
+            fi
+            echo "routing secrets: resolved all six from the individually-supplied secrets"
+          fi
+
       # macf-actions#64: the self-hosted `macf-vm` runner is ALREADY a
       # tailnet node (persistent VM) — re-running the ephemeral-runner
       # tailnet-join here is both redundant and observed to hard-fail
@@ -204,8 +380,8 @@ jobs:
         if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         uses: tailscale/github-action@v3
         with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          oauth-client-id: ${{ env.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ env.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
 
       - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
@@ -249,8 +425,8 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.MACF_ROUTING_APP_ID }}
-          private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          app-id: ${{ env.MACF_ROUTING_APP_ID }}
+          private-key: ${{ env.MACF_ROUTING_APP_KEY }}
           owner: ${{ github.repository_owner }}
           # No permission-* subsetting: `macf-routing` is already a
           # minimum-scope App (metadata:read + actions_variables:read).
@@ -449,8 +625,6 @@ jobs:
       # copy of the CA cert. The registry (see the "Resolve project CA cert"
       # step below) is now the primary source, same as host/port.
       PROJECT_CA_CERT_REPO_VAR_FALLBACK: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
-      ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
-      ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
       # Empty string on every event where route-by-pr-review-state
       # didn't run/notify anyone this run (issue_comment, pull_request,
@@ -464,6 +638,132 @@ jobs:
       # is the unambiguous form regardless.
       REVIEW_STATE_NOTIFIED: ${{ needs['route-by-pr-review-state'].outputs.notified }}
     steps:
+      # groundnuty/macf-actions#1169: resolves ROUTING_CLIENT_CERT/KEY (and
+      # the other four routing secrets) from either MACF_ROUTING_BUNDLE or
+      # the legacy six — see that step's own doc for the full contract.
+      # Deliberately NOT in this job's `env:` block above (unlike the
+      # pre-#1169 shape): a job-level `env: ROUTING_CLIENT_CERT: ${{
+      # secrets.ROUTING_CLIENT_CERT }}` would just be an empty string for a
+      # bundle-only caller, and this step's $GITHUB_ENV write is the ONLY
+      # source of truth for these names in this job — no double-definition
+      # to keep straight.
+      - name: Resolve routing secrets (prefer MACF_ROUTING_BUNDLE — groundnuty/macf-actions#1169)
+        id: resolve-routing-secrets
+        env:
+          BUNDLE: ${{ secrets.MACF_ROUTING_BUNDLE }}
+          IN_MACF_ROUTING_APP_ID: ${{ secrets.MACF_ROUTING_APP_ID }}
+          IN_MACF_ROUTING_APP_KEY: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          IN_ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
+          IN_ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
+          IN_TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          IN_TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+        run: |
+          set -euo pipefail
+
+          # groundnuty/macf#1169 / groundnuty/macf-actions#1169: a caller
+          # generated by macf#1118+ passes ONE secret, MACF_ROUTING_BUNDLE
+          # (base64(JSON) of these same six values, keyed by their own
+          # secret names — apply-routing-secrets.ts::packRoutingBundle).
+          # A legacy caller passes the six individually via
+          # `secrets: inherit` or explicit listing. This step is the ONE
+          # place that decides which source feeds every LATER step in
+          # this job (they read the six under their original names,
+          # either as a plain OS env var in `run:` steps, or via
+          # `${{ env.NAME }}` in a `uses:` step's `with:` block).
+          #
+          # Additive, never a replacement: the bundle wins whenever the
+          # caller supplied it (a present-but-malformed bundle fails
+          # LOUD here rather than silently falling back to the six, even
+          # if those happen to be present too — a bundle-packing bug
+          # must never hide behind a coincidental fallback). The six are
+          # the fallback ONLY when the caller supplied no bundle at all.
+          # A caller supplying NEITHER fails loudly, naming exactly which
+          # secret(s) are missing, before Tailscale connect or the
+          # App-token mint ever run — never a partial run on empty
+          # secrets (silent-fallback-hazards.md Pattern D: GitHub
+          # substitutes empty string for an unsupplied secret, and an
+          # empty-string routing secret must never be handed to curl/
+          # create-github-app-token as if it were real).
+          #
+          # Never echoes a secret value — only names/counts appear in any
+          # echo or ::error:: below. Every extracted value is masked
+          # (line-by-line — GitHub's ::add-mask:: does not reliably
+          # redact a value containing embedded newlines, and
+          # MACF_ROUTING_APP_KEY is raw multi-line PEM; see
+          # actions/runner#475) BEFORE it is written to $GITHUB_ENV.
+
+          NAMES="MACF_ROUTING_APP_ID MACF_ROUTING_APP_KEY ROUTING_CLIENT_CERT ROUTING_CLIENT_KEY TS_OAUTH_CLIENT_ID TS_OAUTH_SECRET"
+
+          emit_secret() {
+            # $1=name $2=value. Masks every line of $2 individually (a
+            # single ::add-mask:: call on a multi-line string does not
+            # reliably mask it — GH's masking is word/line-delimited),
+            # then writes NAME to $GITHUB_ENV behind a random per-call
+            # delimiter (GitHub's documented multiline-value pattern) so
+            # a PEM value's own content can never collide with the
+            # heredoc terminator.
+            local name="$1" value="$2" delim line
+            while IFS= read -r line || [ -n "$line" ]; do
+              [ -n "$line" ] && echo "::add-mask::${line}"
+            done <<< "$value"
+            delim="ROUTING_SECRET_EOF_${name}_${RANDOM}${RANDOM}_$$"
+            {
+              echo "${name}<<${delim}"
+              printf '%s\n' "$value"
+              echo "$delim"
+            } >> "$GITHUB_ENV"
+          }
+
+          if [ -n "${BUNDLE:-}" ]; then
+            echo "routing secrets: MACF_ROUTING_BUNDLE supplied — bundle mode"
+            if ! DECODED=$(printf '%s' "$BUNDLE" | base64 -d 2>/dev/null); then
+              echo "::error::MACF_ROUTING_BUNDLE is not valid base64 — refusing to route on an unreadable bundle"
+              exit 1
+            fi
+            if ! printf '%s' "$DECODED" | jq -e 'type == "object"' >/dev/null 2>&1; then
+              echo "::error::MACF_ROUTING_BUNDLE decoded but is not a JSON object — refusing to route on a malformed bundle"
+              exit 1
+            fi
+            MISSING=""
+            for NAME in $NAMES; do
+              VALUE=$(printf '%s' "$DECODED" | jq -r --arg k "$NAME" '.[$k] // empty')
+              if [ -z "$VALUE" ]; then
+                MISSING="${MISSING:+$MISSING, }$NAME"
+                continue
+              fi
+              emit_secret "$NAME" "$VALUE"
+            done
+            unset DECODED
+            if [ -n "$MISSING" ]; then
+              echo "::error::MACF_ROUTING_BUNDLE is missing required key(s): $MISSING — refusing to route on a partial bundle"
+              exit 1
+            fi
+            echo "routing secrets: unpacked all six values from MACF_ROUTING_BUNDLE"
+          else
+            echo "routing secrets: MACF_ROUTING_BUNDLE not supplied — falling back to the six individual secrets"
+            MISSING=""
+            for NAME in $NAMES; do
+              case "$NAME" in
+                MACF_ROUTING_APP_ID)  VALUE="${IN_MACF_ROUTING_APP_ID:-}" ;;
+                MACF_ROUTING_APP_KEY) VALUE="${IN_MACF_ROUTING_APP_KEY:-}" ;;
+                ROUTING_CLIENT_CERT)  VALUE="${IN_ROUTING_CLIENT_CERT:-}" ;;
+                ROUTING_CLIENT_KEY)   VALUE="${IN_ROUTING_CLIENT_KEY:-}" ;;
+                TS_OAUTH_CLIENT_ID)   VALUE="${IN_TS_OAUTH_CLIENT_ID:-}" ;;
+                TS_OAUTH_SECRET)      VALUE="${IN_TS_OAUTH_SECRET:-}" ;;
+              esac
+              if [ -z "$VALUE" ]; then
+                MISSING="${MISSING:+$MISSING, }$NAME"
+                continue
+              fi
+              emit_secret "$NAME" "$VALUE"
+            done
+            if [ -n "$MISSING" ]; then
+              echo "::error::Neither MACF_ROUTING_BUNDLE nor the following individual routing secret(s) were supplied: $MISSING — this caller cannot route. Pass MACF_ROUTING_BUNDLE (preferred, groundnuty/macf#1112) or all six secrets individually."
+              exit 1
+            fi
+            echo "routing secrets: resolved all six from the individually-supplied secrets"
+          fi
+
       # macf-actions#64: the self-hosted `macf-vm` runner is ALREADY a
       # tailnet node (persistent VM) — re-running the ephemeral-runner
       # tailnet-join here is both redundant and observed to hard-fail
@@ -479,8 +779,8 @@ jobs:
         if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         uses: tailscale/github-action@v3
         with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          oauth-client-id: ${{ env.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ env.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
 
       - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
@@ -500,8 +800,8 @@ jobs:
         id: registry-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.MACF_ROUTING_APP_ID }}
-          private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          app-id: ${{ env.MACF_ROUTING_APP_ID }}
+          private-key: ${{ env.MACF_ROUTING_APP_KEY }}
           owner: ${{ github.repository_owner }}
           # No permission-* subsetting: `macf-routing` is already a
           # minimum-scope App (metadata:read + actions_variables:read).
@@ -684,8 +984,6 @@ jobs:
       # copy of the CA cert. The registry (see the "Resolve project CA cert"
       # step below) is now the primary source, same as host/port.
       PROJECT_CA_CERT_REPO_VAR_FALLBACK: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
-      ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
-      ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CHECK_SUITE_ID: ${{ github.event.check_suite.id }}
       CHECK_SUITE_HEAD_SHA: ${{ github.event.check_suite.head_sha }}
@@ -697,6 +995,133 @@ jobs:
       # uses the inline registry lookup (loop-driven, can't use the
       # composite). Previously had a sparse-checkout as defensive
       # leftover; removed in v3.0.2. See groundnuty/macf-actions#22.
+      #
+      # groundnuty/macf-actions#1169: resolves ROUTING_CLIENT_CERT/KEY
+      # (and the other four routing secrets) from either
+      # MACF_ROUTING_BUNDLE or the legacy six — see that step's own doc
+      # for the full contract. Deliberately NOT in this job's `env:`
+      # block above (unlike the pre-#1169 shape): a job-level `env:
+      # ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}` would
+      # just be an empty string for a bundle-only caller, and this
+      # step's $GITHUB_ENV write is the ONLY source of truth for these
+      # names in this job — no double-definition to keep straight.
+      - name: Resolve routing secrets (prefer MACF_ROUTING_BUNDLE — groundnuty/macf-actions#1169)
+        id: resolve-routing-secrets
+        env:
+          BUNDLE: ${{ secrets.MACF_ROUTING_BUNDLE }}
+          IN_MACF_ROUTING_APP_ID: ${{ secrets.MACF_ROUTING_APP_ID }}
+          IN_MACF_ROUTING_APP_KEY: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          IN_ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
+          IN_ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
+          IN_TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          IN_TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+        run: |
+          set -euo pipefail
+
+          # groundnuty/macf#1169 / groundnuty/macf-actions#1169: a caller
+          # generated by macf#1118+ passes ONE secret, MACF_ROUTING_BUNDLE
+          # (base64(JSON) of these same six values, keyed by their own
+          # secret names — apply-routing-secrets.ts::packRoutingBundle).
+          # A legacy caller passes the six individually via
+          # `secrets: inherit` or explicit listing. This step is the ONE
+          # place that decides which source feeds every LATER step in
+          # this job (they read the six under their original names,
+          # either as a plain OS env var in `run:` steps, or via
+          # `${{ env.NAME }}` in a `uses:` step's `with:` block).
+          #
+          # Additive, never a replacement: the bundle wins whenever the
+          # caller supplied it (a present-but-malformed bundle fails
+          # LOUD here rather than silently falling back to the six, even
+          # if those happen to be present too — a bundle-packing bug
+          # must never hide behind a coincidental fallback). The six are
+          # the fallback ONLY when the caller supplied no bundle at all.
+          # A caller supplying NEITHER fails loudly, naming exactly which
+          # secret(s) are missing, before Tailscale connect or the
+          # App-token mint ever run — never a partial run on empty
+          # secrets (silent-fallback-hazards.md Pattern D: GitHub
+          # substitutes empty string for an unsupplied secret, and an
+          # empty-string routing secret must never be handed to curl/
+          # create-github-app-token as if it were real).
+          #
+          # Never echoes a secret value — only names/counts appear in any
+          # echo or ::error:: below. Every extracted value is masked
+          # (line-by-line — GitHub's ::add-mask:: does not reliably
+          # redact a value containing embedded newlines, and
+          # MACF_ROUTING_APP_KEY is raw multi-line PEM; see
+          # actions/runner#475) BEFORE it is written to $GITHUB_ENV.
+
+          NAMES="MACF_ROUTING_APP_ID MACF_ROUTING_APP_KEY ROUTING_CLIENT_CERT ROUTING_CLIENT_KEY TS_OAUTH_CLIENT_ID TS_OAUTH_SECRET"
+
+          emit_secret() {
+            # $1=name $2=value. Masks every line of $2 individually (a
+            # single ::add-mask:: call on a multi-line string does not
+            # reliably mask it — GH's masking is word/line-delimited),
+            # then writes NAME to $GITHUB_ENV behind a random per-call
+            # delimiter (GitHub's documented multiline-value pattern) so
+            # a PEM value's own content can never collide with the
+            # heredoc terminator.
+            local name="$1" value="$2" delim line
+            while IFS= read -r line || [ -n "$line" ]; do
+              [ -n "$line" ] && echo "::add-mask::${line}"
+            done <<< "$value"
+            delim="ROUTING_SECRET_EOF_${name}_${RANDOM}${RANDOM}_$$"
+            {
+              echo "${name}<<${delim}"
+              printf '%s\n' "$value"
+              echo "$delim"
+            } >> "$GITHUB_ENV"
+          }
+
+          if [ -n "${BUNDLE:-}" ]; then
+            echo "routing secrets: MACF_ROUTING_BUNDLE supplied — bundle mode"
+            if ! DECODED=$(printf '%s' "$BUNDLE" | base64 -d 2>/dev/null); then
+              echo "::error::MACF_ROUTING_BUNDLE is not valid base64 — refusing to route on an unreadable bundle"
+              exit 1
+            fi
+            if ! printf '%s' "$DECODED" | jq -e 'type == "object"' >/dev/null 2>&1; then
+              echo "::error::MACF_ROUTING_BUNDLE decoded but is not a JSON object — refusing to route on a malformed bundle"
+              exit 1
+            fi
+            MISSING=""
+            for NAME in $NAMES; do
+              VALUE=$(printf '%s' "$DECODED" | jq -r --arg k "$NAME" '.[$k] // empty')
+              if [ -z "$VALUE" ]; then
+                MISSING="${MISSING:+$MISSING, }$NAME"
+                continue
+              fi
+              emit_secret "$NAME" "$VALUE"
+            done
+            unset DECODED
+            if [ -n "$MISSING" ]; then
+              echo "::error::MACF_ROUTING_BUNDLE is missing required key(s): $MISSING — refusing to route on a partial bundle"
+              exit 1
+            fi
+            echo "routing secrets: unpacked all six values from MACF_ROUTING_BUNDLE"
+          else
+            echo "routing secrets: MACF_ROUTING_BUNDLE not supplied — falling back to the six individual secrets"
+            MISSING=""
+            for NAME in $NAMES; do
+              case "$NAME" in
+                MACF_ROUTING_APP_ID)  VALUE="${IN_MACF_ROUTING_APP_ID:-}" ;;
+                MACF_ROUTING_APP_KEY) VALUE="${IN_MACF_ROUTING_APP_KEY:-}" ;;
+                ROUTING_CLIENT_CERT)  VALUE="${IN_ROUTING_CLIENT_CERT:-}" ;;
+                ROUTING_CLIENT_KEY)   VALUE="${IN_ROUTING_CLIENT_KEY:-}" ;;
+                TS_OAUTH_CLIENT_ID)   VALUE="${IN_TS_OAUTH_CLIENT_ID:-}" ;;
+                TS_OAUTH_SECRET)      VALUE="${IN_TS_OAUTH_SECRET:-}" ;;
+              esac
+              if [ -z "$VALUE" ]; then
+                MISSING="${MISSING:+$MISSING, }$NAME"
+                continue
+              fi
+              emit_secret "$NAME" "$VALUE"
+            done
+            if [ -n "$MISSING" ]; then
+              echo "::error::Neither MACF_ROUTING_BUNDLE nor the following individual routing secret(s) were supplied: $MISSING — this caller cannot route. Pass MACF_ROUTING_BUNDLE (preferred, groundnuty/macf#1112) or all six secrets individually."
+              exit 1
+            fi
+            echo "routing secrets: resolved all six from the individually-supplied secrets"
+          fi
+
       # macf-actions#64: the self-hosted `macf-vm` runner is ALREADY a
       # tailnet node (persistent VM) — re-running the ephemeral-runner
       # tailnet-join here is both redundant and observed to hard-fail
@@ -712,8 +1137,8 @@ jobs:
         if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         uses: tailscale/github-action@v3
         with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          oauth-client-id: ${{ env.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ env.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
 
       - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
@@ -733,8 +1158,8 @@ jobs:
         id: registry-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.MACF_ROUTING_APP_ID }}
-          private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          app-id: ${{ env.MACF_ROUTING_APP_ID }}
+          private-key: ${{ env.MACF_ROUTING_APP_KEY }}
           owner: ${{ github.repository_owner }}
           # No permission-* subsetting: `macf-routing` is already a
           # minimum-scope App (metadata:read + actions_variables:read).
@@ -930,8 +1355,6 @@ jobs:
       # copy of the CA cert. The registry (see the "Resolve project CA cert"
       # step below) is now the primary source, same as host/port.
       PROJECT_CA_CERT_REPO_VAR_FALLBACK: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
-      ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
-      ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_URL: ${{ github.event.pull_request.html_url }}
@@ -942,6 +1365,132 @@ jobs:
       REVIEW_BODY: ${{ github.event.review.body }}
       PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
     steps:
+      # groundnuty/macf-actions#1169: resolves ROUTING_CLIENT_CERT/KEY (and
+      # the other four routing secrets) from either MACF_ROUTING_BUNDLE or
+      # the legacy six — see that step's own doc for the full contract.
+      # Deliberately NOT in this job's `env:` block above (unlike the
+      # pre-#1169 shape): a job-level `env: ROUTING_CLIENT_CERT: ${{
+      # secrets.ROUTING_CLIENT_CERT }}` would just be an empty string for a
+      # bundle-only caller, and this step's $GITHUB_ENV write is the ONLY
+      # source of truth for these names in this job — no double-definition
+      # to keep straight.
+      - name: Resolve routing secrets (prefer MACF_ROUTING_BUNDLE — groundnuty/macf-actions#1169)
+        id: resolve-routing-secrets
+        env:
+          BUNDLE: ${{ secrets.MACF_ROUTING_BUNDLE }}
+          IN_MACF_ROUTING_APP_ID: ${{ secrets.MACF_ROUTING_APP_ID }}
+          IN_MACF_ROUTING_APP_KEY: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          IN_ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
+          IN_ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
+          IN_TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          IN_TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+        run: |
+          set -euo pipefail
+
+          # groundnuty/macf#1169 / groundnuty/macf-actions#1169: a caller
+          # generated by macf#1118+ passes ONE secret, MACF_ROUTING_BUNDLE
+          # (base64(JSON) of these same six values, keyed by their own
+          # secret names — apply-routing-secrets.ts::packRoutingBundle).
+          # A legacy caller passes the six individually via
+          # `secrets: inherit` or explicit listing. This step is the ONE
+          # place that decides which source feeds every LATER step in
+          # this job (they read the six under their original names,
+          # either as a plain OS env var in `run:` steps, or via
+          # `${{ env.NAME }}` in a `uses:` step's `with:` block).
+          #
+          # Additive, never a replacement: the bundle wins whenever the
+          # caller supplied it (a present-but-malformed bundle fails
+          # LOUD here rather than silently falling back to the six, even
+          # if those happen to be present too — a bundle-packing bug
+          # must never hide behind a coincidental fallback). The six are
+          # the fallback ONLY when the caller supplied no bundle at all.
+          # A caller supplying NEITHER fails loudly, naming exactly which
+          # secret(s) are missing, before Tailscale connect or the
+          # App-token mint ever run — never a partial run on empty
+          # secrets (silent-fallback-hazards.md Pattern D: GitHub
+          # substitutes empty string for an unsupplied secret, and an
+          # empty-string routing secret must never be handed to curl/
+          # create-github-app-token as if it were real).
+          #
+          # Never echoes a secret value — only names/counts appear in any
+          # echo or ::error:: below. Every extracted value is masked
+          # (line-by-line — GitHub's ::add-mask:: does not reliably
+          # redact a value containing embedded newlines, and
+          # MACF_ROUTING_APP_KEY is raw multi-line PEM; see
+          # actions/runner#475) BEFORE it is written to $GITHUB_ENV.
+
+          NAMES="MACF_ROUTING_APP_ID MACF_ROUTING_APP_KEY ROUTING_CLIENT_CERT ROUTING_CLIENT_KEY TS_OAUTH_CLIENT_ID TS_OAUTH_SECRET"
+
+          emit_secret() {
+            # $1=name $2=value. Masks every line of $2 individually (a
+            # single ::add-mask:: call on a multi-line string does not
+            # reliably mask it — GH's masking is word/line-delimited),
+            # then writes NAME to $GITHUB_ENV behind a random per-call
+            # delimiter (GitHub's documented multiline-value pattern) so
+            # a PEM value's own content can never collide with the
+            # heredoc terminator.
+            local name="$1" value="$2" delim line
+            while IFS= read -r line || [ -n "$line" ]; do
+              [ -n "$line" ] && echo "::add-mask::${line}"
+            done <<< "$value"
+            delim="ROUTING_SECRET_EOF_${name}_${RANDOM}${RANDOM}_$$"
+            {
+              echo "${name}<<${delim}"
+              printf '%s\n' "$value"
+              echo "$delim"
+            } >> "$GITHUB_ENV"
+          }
+
+          if [ -n "${BUNDLE:-}" ]; then
+            echo "routing secrets: MACF_ROUTING_BUNDLE supplied — bundle mode"
+            if ! DECODED=$(printf '%s' "$BUNDLE" | base64 -d 2>/dev/null); then
+              echo "::error::MACF_ROUTING_BUNDLE is not valid base64 — refusing to route on an unreadable bundle"
+              exit 1
+            fi
+            if ! printf '%s' "$DECODED" | jq -e 'type == "object"' >/dev/null 2>&1; then
+              echo "::error::MACF_ROUTING_BUNDLE decoded but is not a JSON object — refusing to route on a malformed bundle"
+              exit 1
+            fi
+            MISSING=""
+            for NAME in $NAMES; do
+              VALUE=$(printf '%s' "$DECODED" | jq -r --arg k "$NAME" '.[$k] // empty')
+              if [ -z "$VALUE" ]; then
+                MISSING="${MISSING:+$MISSING, }$NAME"
+                continue
+              fi
+              emit_secret "$NAME" "$VALUE"
+            done
+            unset DECODED
+            if [ -n "$MISSING" ]; then
+              echo "::error::MACF_ROUTING_BUNDLE is missing required key(s): $MISSING — refusing to route on a partial bundle"
+              exit 1
+            fi
+            echo "routing secrets: unpacked all six values from MACF_ROUTING_BUNDLE"
+          else
+            echo "routing secrets: MACF_ROUTING_BUNDLE not supplied — falling back to the six individual secrets"
+            MISSING=""
+            for NAME in $NAMES; do
+              case "$NAME" in
+                MACF_ROUTING_APP_ID)  VALUE="${IN_MACF_ROUTING_APP_ID:-}" ;;
+                MACF_ROUTING_APP_KEY) VALUE="${IN_MACF_ROUTING_APP_KEY:-}" ;;
+                ROUTING_CLIENT_CERT)  VALUE="${IN_ROUTING_CLIENT_CERT:-}" ;;
+                ROUTING_CLIENT_KEY)   VALUE="${IN_ROUTING_CLIENT_KEY:-}" ;;
+                TS_OAUTH_CLIENT_ID)   VALUE="${IN_TS_OAUTH_CLIENT_ID:-}" ;;
+                TS_OAUTH_SECRET)      VALUE="${IN_TS_OAUTH_SECRET:-}" ;;
+              esac
+              if [ -z "$VALUE" ]; then
+                MISSING="${MISSING:+$MISSING, }$NAME"
+                continue
+              fi
+              emit_secret "$NAME" "$VALUE"
+            done
+            if [ -n "$MISSING" ]; then
+              echo "::error::Neither MACF_ROUTING_BUNDLE nor the following individual routing secret(s) were supplied: $MISSING — this caller cannot route. Pass MACF_ROUTING_BUNDLE (preferred, groundnuty/macf#1112) or all six secrets individually."
+              exit 1
+            fi
+            echo "routing secrets: resolved all six from the individually-supplied secrets"
+          fi
+
       # macf-actions#64: the self-hosted `macf-vm` runner is ALREADY a
       # tailnet node (persistent VM) — re-running the ephemeral-runner
       # tailnet-join here is both redundant and observed to hard-fail
@@ -957,8 +1506,8 @@ jobs:
         if: ${{ !contains(needs.pick-runner.outputs.labels, 'self-hosted') }}
         uses: tailscale/github-action@v3
         with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          oauth-client-id: ${{ env.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ env.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
 
       - name: Assert tailnet is up (Instance 11 — connect can exit 0 on retry-exhaustion)
@@ -978,8 +1527,8 @@ jobs:
         id: registry-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.MACF_ROUTING_APP_ID }}
-          private-key: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          app-id: ${{ env.MACF_ROUTING_APP_ID }}
+          private-key: ${{ env.MACF_ROUTING_APP_KEY }}
           owner: ${{ github.repository_owner }}
 
       - name: Resolve project CA cert (registry primary, repo-var fallback)
