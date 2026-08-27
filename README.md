@@ -49,7 +49,20 @@ Optional input: `registry-api-path` (default `/orgs/${{ github.repository_owner 
 
 Configure these in your repo's **Settings → Secrets and variables → Actions**:
 
-**Secrets (→ `Secrets` tab):**
+**Secrets (→ `Secrets` tab) — either form works (groundnuty/macf-actions#1169):**
+
+**Preferred — one bundled secret**, so a caller's `secrets:` block never has to change again when this workflow's secret set changes (groundnuty/macf#1112/#1118):
+
+| Secret | Purpose |
+|---|---|
+| `MACF_ROUTING_BUNDLE` | `base64(JSON)` of the six values in the legacy table below, keyed by their own secret names. Generated automatically by `macf repo-init` on a bundle-capable `macf-actions` pin (`v3.5.0`+); a caller supplying this needs none of the six. |
+
+```yaml
+    secrets:
+      MACF_ROUTING_BUNDLE: ${{ secrets.MACF_ROUTING_BUNDLE }}
+```
+
+**Legacy — six individual secrets**, still fully supported (every route-by-* job tries the bundle first, then falls back to these):
 
 | Secret | Purpose |
 |---|---|
@@ -59,6 +72,10 @@ Configure these in your repo's **Settings → Secrets and variables → Actions*
 | `TS_OAUTH_SECRET` | Tailscale OAuth secret for the runner |
 | `MACF_ROUTING_APP_ID` | GitHub App ID for a dedicated `variables:read`-only App. Used to mint short-lived registry-read tokens. See below. |
 | `MACF_ROUTING_APP_KEY` | PEM private key for the `macf-routing` App. **Keep strictly secret.** |
+
+A caller supplying **neither** the bundle nor a complete six fails the job loudly (naming exactly which secret(s) are missing) rather than proceeding on empty values; a caller supplying a **malformed** bundle (bad base64, bad JSON, or missing a key) also fails loudly and does not silently fall back to the six even if those happen to be present too.
+
+**Exception: `TS_OAUTH_CLIENT_ID`/`TS_OAUTH_SECRET` may be omitted if you route exclusively via the self-hosted `macf-vm` runner** (origin-routing, [`#59`](https://github.com/groundnuty/macf-actions/issues/59)) — that runner is already tailnet-joined, so the Tailscale-connect step never runs and these two values are never consumed. They're only genuinely required when a github-hosted (ephemeral) runner will attempt the connect. `MACF_ROUTING_APP_ID`/`MACF_ROUTING_APP_KEY` and `ROUTING_CLIENT_CERT`/`ROUTING_CLIENT_KEY` have no such carve-out — every route-by-* job always needs them (except `MACF_ROUTING_BUNDLE`-only callers, per the preferred form above).
 
 **Variables (→ `Variables` tab, not `Secrets` — these are PUBLIC-readable PEM, not private):**
 

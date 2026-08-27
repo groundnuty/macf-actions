@@ -63,8 +63,9 @@ jobs:
     runs-on: ubuntu-latest
     # Canonical-vector tests for the embedded-bash logic in agent-router.yml
     # (code-context strip, endpoint-transform, PR-review recipient-set actor
-    # exclusion, CA-cert resolution precedence). Run via `bash` so they
-    # don't depend on the +x bit.
+    # exclusion, CA-cert resolution precedence, routing-bundle unpack per
+    # groundnuty/macf-actions#1169). Run via `bash` so they don't depend on
+    # the +x bit.
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: Run vector tests
@@ -72,7 +73,8 @@ jobs:
           for t in test/code-context-strip.sh \
                    test/resolve-agent-endpoint-transform.sh \
                    test/pr-review-recipient-actor-exclusion.sh \
-                   test/ca-cert-resolution.sh; do
+                   test/ca-cert-resolution.sh \
+                   test/routing-bundle-unpack.sh; do
             echo "── $t ──"
             bash "$t"
           done
