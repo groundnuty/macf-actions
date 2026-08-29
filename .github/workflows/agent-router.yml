@@ -477,6 +477,7 @@ jobs:
             done
             if [ -n "$MISSING" ]; then
               echo "::error::Neither MACF_ROUTING_BUNDLE nor the following individual routing secret(s) were supplied: $MISSING — this caller cannot route. Pass MACF_ROUTING_BUNDLE (preferred, groundnuty/macf#1112) or all six secrets individually."
+              echo "::error::Likely cause if you're a cross-org/enterprise caller: 'secrets: inherit' only propagates within the SAME organization/enterprise (GitHub docs) — see groundnuty/macf#1338, where a cross-org caller had all six secrets on its OWN repo but none reached this call. Pass the routing secrets explicitly in your caller workflow's 'secrets:' block, or supply MACF_ROUTING_BUNDLE."
               exit 1
             fi
             echo "routing secrets: resolved all six from the individually-supplied secrets"
@@ -878,6 +879,7 @@ jobs:
             done
             if [ -n "$MISSING" ]; then
               echo "::error::Neither MACF_ROUTING_BUNDLE nor the following individual routing secret(s) were supplied: $MISSING — this caller cannot route. Pass MACF_ROUTING_BUNDLE (preferred, groundnuty/macf#1112) or all six secrets individually."
+              echo "::error::Likely cause if you're a cross-org/enterprise caller: 'secrets: inherit' only propagates within the SAME organization/enterprise (GitHub docs) — see groundnuty/macf#1338, where a cross-org caller had all six secrets on its OWN repo but none reached this call. Pass the routing secrets explicitly in your caller workflow's 'secrets:' block, or supply MACF_ROUTING_BUNDLE."
               exit 1
             fi
             echo "routing secrets: resolved all six from the individually-supplied secrets"
@@ -1255,6 +1257,7 @@ jobs:
             done
             if [ -n "$MISSING" ]; then
               echo "::error::Neither MACF_ROUTING_BUNDLE nor the following individual routing secret(s) were supplied: $MISSING — this caller cannot route. Pass MACF_ROUTING_BUNDLE (preferred, groundnuty/macf#1112) or all six secrets individually."
+              echo "::error::Likely cause if you're a cross-org/enterprise caller: 'secrets: inherit' only propagates within the SAME organization/enterprise (GitHub docs) — see groundnuty/macf#1338, where a cross-org caller had all six secrets on its OWN repo but none reached this call. Pass the routing secrets explicitly in your caller workflow's 'secrets:' block, or supply MACF_ROUTING_BUNDLE."
               exit 1
             fi
             echo "routing secrets: resolved all six from the individually-supplied secrets"
@@ -1643,6 +1646,7 @@ jobs:
             done
             if [ -n "$MISSING" ]; then
               echo "::error::Neither MACF_ROUTING_BUNDLE nor the following individual routing secret(s) were supplied: $MISSING — this caller cannot route. Pass MACF_ROUTING_BUNDLE (preferred, groundnuty/macf#1112) or all six secrets individually."
+              echo "::error::Likely cause if you're a cross-org/enterprise caller: 'secrets: inherit' only propagates within the SAME organization/enterprise (GitHub docs) — see groundnuty/macf#1338, where a cross-org caller had all six secrets on its OWN repo but none reached this call. Pass the routing secrets explicitly in your caller workflow's 'secrets:' block, or supply MACF_ROUTING_BUNDLE."
               exit 1
             fi
             echo "routing secrets: resolved all six from the individually-supplied secrets"
