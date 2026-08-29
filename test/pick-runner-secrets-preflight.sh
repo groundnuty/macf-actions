@@ -192,9 +192,12 @@ check 'bundle present, six entirely absent → proceeds (bundle-only caller)' 0 
   BUNDLE="$BUNDLE_VALID"
 
 # 5. Both forms present → proceeds, no ambiguity error (bundle wins, six
-#    being present too is not an error).
+#    being present too is not an error). Checks for the `::error::`
+#    prefix specifically, not the bare substring "error" — the masked
+#    base64 BUNDLE_VALID could in principle contain that substring by
+#    chance, which would make a bare-substring check flaky.
 check 'both forms present → proceeds, no ambiguity error' 0 \
-  'form B .* is complete' 'error' \
+  'form B .* is complete' '::error::' \
   BUNDLE="$BUNDLE_VALID" \
   IN_MACF_ROUTING_APP_ID=999 \
   IN_MACF_ROUTING_APP_KEY=keydata \
