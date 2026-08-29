@@ -22,6 +22,20 @@ name: Agent Router (reusable, v3 — registry-driven mTLS transport)
 #                             (omit trailing /actions/variables). Covers
 #                             all three DR-006 scopes: org, profile, repo.
 #                             Optional; defaults to `/orgs/<caller-owner>`.
+#     runner-runs-on         — (macf-actions#81) mirrors the fleet manifest's
+#                             `routing.runner.runs_on` verbatim. When exactly
+#                             "self-hosted", `pick-runner` REFUSES to fall
+#                             back to a metered github-hosted runner for a
+#                             non-fork event whose actor isn't trusted — it
+#                             fails the job instead (naming the actor, the
+#                             MACF_TRUSTED_ACTORS variable, and the repo) so
+#                             a declared-self-hosted fleet can never silently
+#                             bill on ubuntu-latest. Optional; omitted/empty/
+#                             any other value leaves `pick-runner` exactly as
+#                             it behaved before #81 — including a fork PR,
+#                             which still downgrades to hosted without
+#                             failing regardless of this input (an untrusted
+#                             fork must never reach the self-hosted runner).
 #   secrets (groundnuty/macf-actions#1169 — either form works; bundle
 #   preferred, six-secret form kept for backward compatibility):
 #     MACF_ROUTING_BUNDLE   — PREFERRED. base64(JSON) of the six values
@@ -95,6 +109,20 @@ on:
         type: string
         required: false
         default: /orgs/${{ github.repository_owner }}
+      runner-runs-on:
+        description: >-
+          Optional (groundnuty/macf-actions#81). Mirrors the fleet
+          manifest's `routing.runner.runs_on` verbatim. When exactly
+          "self-hosted", `pick-runner` fails the job — naming the actor,
+          MACF_TRUSTED_ACTORS, and the repo — instead of silently
+          relocating to a metered github-hosted runner for a non-fork
+          event whose actor isn't trusted. Omitted, empty, or any other
+          value (e.g. "hosted") leaves `pick-runner`'s behaviour exactly
+          as it was before #81. A fork PR always keeps downgrading to
+          hosted without failing, regardless of this input.
+        type: string
+        required: false
+        default: ''
     secrets:
       # groundnuty/macf-actions#1169: all seven below are `required: false`
       # at the workflow_call level so BOTH forms are structurally optional
@@ -168,11 +196,14 @@ jobs:
   # Trusted actor on a NON-fork event → self-hosted VM runner (fast path,
   # ~6-9s vs ~40s); everyone else (outsiders / fork PRs) → github-hosted.
   # FAILS SAFE: unset/empty MACF_TRUSTED_ACTORS (the CALLER repo's var) →
-  # ubuntu-latest (today's behaviour). So this lands BEFORE any runner exists;
-  # the self-hosted branch activates only once the var is set AND a runner is
-  # registered (register-before-route sequencing — devops RUNNER.md). Trust is
-  # decided from github.actor + head.repo.fork, both GitHub-set (not spoofable).
-  # Every downstream job derives runs-on from this job's output.
+  # ubuntu-latest (today's behaviour) UNLESS the caller declared
+  # runner-runs-on: self-hosted (#81 below), in which case that same
+  # untrusted-actor condition fails the job instead. So this lands BEFORE
+  # any runner exists; the self-hosted branch activates only once the var
+  # is set AND a runner is registered (register-before-route sequencing —
+  # devops RUNNER.md). Trust is decided from github.actor + head.repo.fork,
+  # both GitHub-set (not spoofable). Every downstream job derives runs-on
+  # from this job's output.
   pick-runner:
     runs-on: ubuntu-latest
     outputs:
@@ -184,22 +215,44 @@ jobs:
           TRUSTED_ACTORS: ${{ vars.MACF_TRUSTED_ACTORS }}
           ACTOR: ${{ github.actor }}
           IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          RUNNER_RUNS_ON: ${{ inputs.runner-runs-on }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           set -f  # disable globbing — actor logins contain [bot]
           labels='"ubuntu-latest"'   # default: github-hosted (safe fallback)
+          trusted=false
           # Self-host ONLY for a trusted actor on a non-fork event. Logins in
           # MACF_TRUSTED_ACTORS are comma / space / newline separated.
           if [ "${IS_FORK:-}" != "true" ] && [ -n "${TRUSTED_ACTORS:-}" ]; then
             for a in ${TRUSTED_ACTORS//,/ }; do
               if [ "$a" = "$ACTOR" ]; then
                 labels='["self-hosted","macf-vm"]'
+                trusted=true
                 break
               fi
             done
           fi
+          # macf-actions#81 — a caller that DECLARES runner-runs-on:
+          # self-hosted must never silently relocate real work onto a
+          # metered ubuntu-latest runner ("it should be impossible and
+          # forbidden to fall back", per the operator's directive on #81).
+          # The fork carve-out above is deliberately untouched: an
+          # untrusted fork PR still downgrades instead of failing, because
+          # self-hosted access for an unreviewed fork is exactly what that
+          # downgrade exists to prevent regardless of what the caller
+          # declared. Only a non-fork event whose actor failed the trust
+          # check is a silent-billing risk — that's the one case this
+          # turns into a red job. An unset/empty MACF_TRUSTED_ACTORS
+          # (declaration effectively unreadable) falls into the same
+          # untrusted branch above, so it fails closed here too — it is
+          # never inferred as "hosted is fine".
+          if [ "${RUNNER_RUNS_ON:-}" = "self-hosted" ] && [ "$trusted" != "true" ] && [ "${IS_FORK:-}" != "true" ]; then
+            echo "::error::runner-runs-on=self-hosted was declared for ${REPO:-this repo}, but actor '${ACTOR:-<unknown>}' is not listed in the MACF_TRUSTED_ACTORS variable (repo or org scope) that pick-runner reads to decide self-hosted eligibility — refusing to fall back to a metered ubuntu-latest runner. Fix: add '${ACTOR:-<actor>}' to MACF_TRUSTED_ACTORS on ${REPO:-the caller repo} (or its org), then re-run."
+            exit 1
+          fi
           echo "labels=$labels" >> "$GITHUB_OUTPUT"
-          echo "runner: actor='$ACTOR' fork='${IS_FORK:-false}' -> $labels"
+          echo "runner: actor='$ACTOR' fork='${IS_FORK:-false}' runner-runs-on='${RUNNER_RUNS_ON:-<none>}' -> $labels"
 
   # ─── LOAD CONFIG ───
   config:
