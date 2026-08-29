@@ -128,21 +128,35 @@ on:
       # at the workflow_call level so BOTH forms are structurally optional
       # (a bundle-only caller's `secrets:` block need not enumerate the six;
       # a legacy caller need not add the bundle). This does NOT mean a run
-      # can proceed with nothing — every route-by-* job's first step
-      # ("Resolve routing secrets") fails the job loudly, naming exactly
-      # which secret(s) are missing, if neither a valid bundle nor a
-      # complete six resolves — EXCEPT TS_OAUTH_CLIENT_ID/TS_OAUTH_SECRET,
-      # which the fallback path only requires when this run will actually
-      # attempt a Tailscale connect (TAILNET_NEEDED — see each job's own
-      # "Resolve routing secrets" step doc). A fleet routing exclusively
-      # via the self-hosted `macf-vm` runner (already tailnet-joined,
-      # #64) never consumes those two, and requiring them anyway would
-      # have broken every such fleet's routing on upgrade. Declaring
-      # `required: true` here would only catch "caller's secrets: block
-      # omits the name entirely" (a YAML authoring mistake) — it can't
-      # express "either this OR those six, together" (nor the Tailscale
-      # carve-out), so that invariant is enforced in shell instead, at the
-      # one place that already needs to inspect both sources.
+      # can proceed with nothing:
+      #   - groundnuty/macf-actions#82: `pick-runner` (the FIRST job) has
+      #     its own "Assert one complete routing-secrets form before any
+      #     work" step, which fails the job loudly — before `config` or any
+      #     route-by-* job does any work — naming BOTH valid forms, exactly
+      #     which of the six is missing, and (on the "neither form"
+      #     failure) the likely cross-org `secrets: inherit` cause
+      #     (groundnuty/macf#1338). A `pick-runner` failure fails/skips
+      #     every downstream job via the existing `needs:` chain.
+      #   - Each route-by-* job ALSO still has its own first-step
+      #     "Resolve routing secrets" check (pre-existing, #1169) — this is
+      #     what actually POPULATES the resolved values for that job's use
+      #     (mint the App token, mTLS POST, etc). Given the pick-runner
+      #     assertion above already validated the same invariant from the
+      #     same inputs, this per-job check should never newly fail in
+      #     practice; it remains as the value-resolution mechanism and as
+      #     defense-in-depth.
+      # In both places, EXCEPT TS_OAUTH_CLIENT_ID/TS_OAUTH_SECRET, which
+      # the fallback path only requires when this run will actually
+      # attempt a Tailscale connect (TAILNET_NEEDED — see each check's own
+      # step doc). A fleet routing exclusively via the self-hosted
+      # `macf-vm` runner (already tailnet-joined, #64) never consumes
+      # those two, and requiring them anyway would have broken every such
+      # fleet's routing on upgrade. Declaring `required: true` here would
+      # only catch "caller's secrets: block omits the name entirely" (a
+      # YAML authoring mistake) — it can't express "either this OR those
+      # six, together" (nor the Tailscale carve-out), so that invariant is
+      # enforced in shell instead, at the places that inspect both
+      # sources.
       MACF_ROUTING_BUNDLE:
         description: >-
           Preferred. base64(JSON) of the six routing secrets below, keyed
@@ -253,6 +267,134 @@ jobs:
           fi
           echo "labels=$labels" >> "$GITHUB_OUTPUT"
           echo "runner: actor='$ACTOR' fork='${IS_FORK:-false}' runner-runs-on='${RUNNER_RUNS_ON:-<none>}' -> $labels"
+
+      # groundnuty/macf-actions#82: EARLIEST-JOB precondition check. The
+      # per-job "Resolve routing secrets" step (in each of the four
+      # route-by-* jobs below) already fails loud on an incomplete
+      # config — but only for the ONE job whose OWN event matched, and
+      # only after `config` has already run. This step asserts the same
+      # invariant — exactly ONE complete form (A: all six individual
+      # secrets, or B: MACF_ROUTING_BUNDLE) — here instead, in the FIRST
+      # job of the workflow, before `config` or any route-by-* job does
+      # any work. A `run:` step failure fails this job, which fails/skips
+      # every downstream job via the existing `needs:` chain (`config:
+      # needs: pick-runner`; every route-by-*: `needs: [config, ...]`) —
+      # no new `needs:` edges required anywhere else in this file.
+      #
+      # `if:` mirrors the UNION of the four route-by-* jobs' own
+      # top-level event/action gates below — deliberately coarser than
+      # route-by-label's internal "gate" step (which additionally skips
+      # non-agent labels + self-routing) and coarser than
+      # route-by-pr-review-state's action/state filter (a strict subset
+      # of route-by-mention's `pull_request_review` condition, already
+      # covered): a caller that wires this reusable workflow to ANY of
+      # these event types is presumed to want agent routing to work, so
+      # requiring a complete form on the FIRST such event — even one
+      # that would ultimately no-op inside its own job, e.g. a non-agent
+      # label — surfaces a misconfigured caller before its first
+      # agent-labeled issue rather than after. KEEP IN LOCKSTEP with the
+      # four jobs' own `if:` blocks if their trigger surface changes —
+      # same manual-lockstep convention this repo already applies to
+      # test/routing-bundle-unpack.sh (see that file's header comment).
+      - name: Assert one complete routing-secrets form before any work (#82)
+        id: validate-routing-secrets
+        if: >
+          (
+            (github.event_name == 'issues' && github.event.action == 'labeled') ||
+            (github.event_name == 'issue_comment') ||
+            (github.event_name == 'pull_request') ||
+            (github.event_name == 'pull_request_review') ||
+            (github.event_name == 'check_suite' && github.event.action == 'completed')
+          )
+        env:
+          BUNDLE: ${{ secrets.MACF_ROUTING_BUNDLE }}
+          IN_MACF_ROUTING_APP_ID: ${{ secrets.MACF_ROUTING_APP_ID }}
+          IN_MACF_ROUTING_APP_KEY: ${{ secrets.MACF_ROUTING_APP_KEY }}
+          IN_ROUTING_CLIENT_CERT: ${{ secrets.ROUTING_CLIENT_CERT }}
+          IN_ROUTING_CLIENT_KEY: ${{ secrets.ROUTING_CLIENT_KEY }}
+          IN_TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          IN_TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          # Same carve-out as every route-by-* job's own resolution step:
+          # a fleet routing exclusively via the self-hosted `macf-vm`
+          # runner (already tailnet-joined, #64) never needs TS_OAUTH_*.
+          # `steps.pick.outputs.labels` (this job's OWN prior step, not
+          # `needs.pick-runner...` — we ARE pick-runner) is the same
+          # value every downstream job reads.
+          TAILNET_NEEDED: ${{ !contains(steps.pick.outputs.labels, 'self-hosted') }}
+        run: |
+          set -euo pipefail
+
+          # Validate-only: unlike each route-by-* job's own resolution
+          # step, this step never needs the values downstream (pick-runner
+          # has no route to make) — it only asserts completeness and
+          # exits. Masking guards against an accidental future debug
+          # echo, not against any write this step currently performs.
+          mask_lines() {
+            local value="$1" line
+            while IFS= read -r line || [ -n "$line" ]; do
+              [ -n "$line" ] && echo "::add-mask::${line}"
+            done <<< "$value"
+          }
+
+          NAMES="MACF_ROUTING_APP_ID MACF_ROUTING_APP_KEY ROUTING_CLIENT_CERT ROUTING_CLIENT_KEY TS_OAUTH_CLIENT_ID TS_OAUTH_SECRET"
+          CROSS_ORG_HINT="Likely cause if you're a cross-org/enterprise caller: 'secrets: inherit' only propagates within the SAME organization/enterprise (GitHub docs) — see groundnuty/macf#1338, where a cross-org caller had all six secrets on its OWN repo but none reached this call. Pass the routing secrets explicitly in your caller workflow's 'secrets:' block, or supply MACF_ROUTING_BUNDLE."
+
+          if [ -n "${BUNDLE:-}" ]; then
+            mask_lines "$BUNDLE"
+            echo "routing secrets preflight: MACF_ROUTING_BUNDLE supplied — validating form B (bundle)"
+            if ! DECODED=$(printf '%s' "$BUNDLE" | base64 -d 2>/dev/null); then
+              echo "::error::MACF_ROUTING_BUNDLE is not valid base64 — refusing to route on an unreadable bundle."
+              exit 1
+            fi
+            mask_lines "$DECODED"
+            if ! printf '%s' "$DECODED" | jq -e 'type == "object"' >/dev/null 2>&1; then
+              echo "::error::MACF_ROUTING_BUNDLE decoded but is not a JSON object — refusing to route on a malformed bundle."
+              exit 1
+            fi
+            MISSING=""
+            for NAME in $NAMES; do
+              VALUE=$(printf '%s' "$DECODED" | jq -r --arg k "$NAME" '.[$k] // empty')
+              [ -z "$VALUE" ] && MISSING="${MISSING:+$MISSING, }$NAME"
+            done
+            unset DECODED
+            if [ -n "$MISSING" ]; then
+              echo "::error::MACF_ROUTING_BUNDLE is missing required key(s): $MISSING — refusing to route on a partial bundle."
+              exit 1
+            fi
+            echo "routing secrets preflight: form B (MACF_ROUTING_BUNDLE) is complete — proceeding"
+            exit 0
+          fi
+
+          echo "routing secrets preflight: MACF_ROUTING_BUNDLE not supplied — validating form A (six individual secrets)"
+          MISSING=""
+          for NAME in $NAMES; do
+            case "$NAME" in
+              MACF_ROUTING_APP_ID)  VALUE="${IN_MACF_ROUTING_APP_ID:-}" ;;
+              MACF_ROUTING_APP_KEY) VALUE="${IN_MACF_ROUTING_APP_KEY:-}" ;;
+              ROUTING_CLIENT_CERT)  VALUE="${IN_ROUTING_CLIENT_CERT:-}" ;;
+              ROUTING_CLIENT_KEY)   VALUE="${IN_ROUTING_CLIENT_KEY:-}" ;;
+              TS_OAUTH_CLIENT_ID)   VALUE="${IN_TS_OAUTH_CLIENT_ID:-}" ;;
+              TS_OAUTH_SECRET)      VALUE="${IN_TS_OAUTH_SECRET:-}" ;;
+            esac
+            if [ -n "$VALUE" ]; then
+              mask_lines "$VALUE"
+              continue
+            fi
+            if { [ "$NAME" = "TS_OAUTH_CLIENT_ID" ] || [ "$NAME" = "TS_OAUTH_SECRET" ]; } \
+              && [ "${TAILNET_NEEDED:-true}" != "true" ]; then
+              echo "routing secrets preflight: $NAME not supplied and not needed this run (self-hosted runner skips Tailscale connect) — leaving unset"
+              continue
+            fi
+            MISSING="${MISSING:+$MISSING, }$NAME"
+          done
+
+          if [ -n "$MISSING" ]; then
+            echo "::error::This caller supplied neither a complete MACF_ROUTING_BUNDLE (form B) nor a complete set of the six individual routing secrets (form A). Missing from form A: $MISSING."
+            echo "::error::Exactly ONE complete form is required: (A) all six — MACF_ROUTING_APP_ID, MACF_ROUTING_APP_KEY, ROUTING_CLIENT_CERT, ROUTING_CLIENT_KEY, TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET — or (B) MACF_ROUTING_BUNDLE (preferred, groundnuty/macf#1112)."
+            echo "::error::${CROSS_ORG_HINT}"
+            exit 1
+          fi
+          echo "routing secrets preflight: form A (six individual secrets) is complete — proceeding"
 
   # ─── LOAD CONFIG ───
   config:
