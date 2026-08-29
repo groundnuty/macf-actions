@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+> **⚠️ WHOEVER CUTS v3.5.0 — a `macf` verdict branch activates with this tag.**
+>
+> `#75`'s `TAILNET_NEEDED` carve-out makes `TS_OAUTH_CLIENT_ID`/`TS_OAUTH_SECRET`
+> non-required for a job routing to a self-hosted runner. `macf`'s fleet verdict
+> (`fleet-verdict.ts`, `MIN_TAILNET_CARVEOUT_ACTIONS_VERSION = 'v3.5.0'`) keys its
+> required-secret set on the *pinned* router version, so **cutting this tag is the
+> moment that branch becomes reachable** — and it has never run against a real pin.
+>
+> A wrong `carries` marks a still-six-required fleet **CONFIRMED**, which is silent.
+> **First fleet to pin v3.5.0: verify its routing verdict against actual secret
+> presence before trusting it.** Ref `groundnuty/macf#1239`.
+
+
 ### Added — becomes v3.5.0 on release (matches `groundnuty/macf`'s `MIN_BUNDLE_CAPABLE_ACTIONS_VERSION` gate)
 
 - **Every `route-by-*` job now accepts `MACF_ROUTING_BUNDLE`** — a single `base64(JSON)` secret bundling the six routing secrets below, keyed by their own names ([groundnuty/macf#1112](https://github.com/groundnuty/macf/issues/1112) / [#1118](https://github.com/groundnuty/macf/pull/1118) / [groundnuty/macf-actions#1169](https://github.com/groundnuty/macf-actions/issues/1169)). A caller supplying the bundle needs no other routing secret, and its generated `secrets:` block never has to change again when this workflow's secret set changes — closing the class of bug where a caller generated before a secret-set change fails with `Secret X is required, but not provided` on a stale caller.
