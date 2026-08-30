@@ -37,6 +37,14 @@ jobs:
 
 Optional input: `registry-api-path` (default `/orgs/${{ github.repository_owner }}`) — override for DR-006 profile scope (`/repos/<user>/<user>`) or cross-org registries.
 
+Optional input: `runner-runs-on` (default `''`) — mirrors your fleet manifest's `routing.runner.runs_on` verbatim (groundnuty/macf-actions#81). Set it to `self-hosted` for a fleet that MUST run on your own runner: `pick-runner` then FAILS the job — naming the actor, the `MACF_TRUSTED_ACTORS` variable, and the repo — instead of silently relocating to a metered `ubuntu-latest` runner when the triggering actor isn't trusted. Leave it unset (or `hosted`) to keep the pre-#81 behaviour exactly — including the fork-PR downgrade, which always applies regardless of this input.
+
+```yaml
+    with:
+      project: your-project-name
+      runner-runs-on: self-hosted  # only if your fleet MUST run on your own runner
+```
+
 ### v2.x (deprecated — DR-007 violating)
 
 `@v2` / `@v2.0.1` are superseded by v3. v2 read agent endpoints from caller's `agent-config.json`, contradicting DR-007 ("registry is the single source of truth for port/host"). Existing consumers on `@v2` still work, but migrate at next convenient window — see [CHANGELOG §3.0.0](./CHANGELOG.md) for the step-by-step upgrade.
