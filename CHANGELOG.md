@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+(no unreleased changes)
+
+## [3.5.0] — 2026-08-31
+
 > **⚠️ WHOEVER CUTS v3.5.0 — a `macf` verdict branch activates with this tag.**
 >
 > `#75`'s `TAILNET_NEEDED` carve-out makes `TS_OAUTH_CLIENT_ID`/`TS_OAUTH_SECRET`
@@ -17,7 +21,7 @@ All notable changes to this project will be documented in this file. The format 
 > presence before trusting it.** Ref `groundnuty/macf#1239`.
 
 
-### Added — becomes v3.5.0 on release (matches `groundnuty/macf`'s `MIN_BUNDLE_CAPABLE_ACTIONS_VERSION` gate)
+### Added — matches `groundnuty/macf`'s `MIN_BUNDLE_CAPABLE_ACTIONS_VERSION` gate
 
 - **Every `route-by-*` job now accepts `MACF_ROUTING_BUNDLE`** — a single `base64(JSON)` secret bundling the six routing secrets below, keyed by their own names ([groundnuty/macf#1112](https://github.com/groundnuty/macf/issues/1112) / [#1118](https://github.com/groundnuty/macf/pull/1118) / [groundnuty/macf-actions#1169](https://github.com/groundnuty/macf-actions/issues/1169)). A caller supplying the bundle needs no other routing secret, and its generated `secrets:` block never has to change again when this workflow's secret set changes — closing the class of bug where a caller generated before a secret-set change fails with `Secret X is required, but not provided` on a stale caller.
 - **New first step per job, "Resolve routing secrets (prefer MACF_ROUTING_BUNDLE)"**: decodes + validates the bundle, or falls back to the legacy six individually-passed secrets (`ROUTING_CLIENT_CERT`, `ROUTING_CLIENT_KEY`, `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `MACF_ROUTING_APP_ID`, `MACF_ROUTING_APP_KEY`) when the bundle is absent. Additive, never a replacement — a **malformed** (present-but-unreadable) bundle fails the job loudly, naming what's wrong, and never silently falls through to the six even when those happen to be present too. A caller supplying **neither** form fails loudly, naming exactly which secret(s) are missing — never a partial run on GitHub Actions' empty-string-for-missing-secret substitution (`silent-fallback-hazards.md` Pattern D). **Exception:** `TS_OAUTH_CLIENT_ID`/`TS_OAUTH_SECRET` are NOT required in the fallback path when this run won't attempt a Tailscale connect — i.e. on the self-hosted `macf-vm` runner (already tailnet-joined, `#64`), which is the common case since `transport.tailscale_oauth_required` defaults to `false` on the `groundnuty/macf` side. Requiring them unconditionally would have broken every such already-routing fleet's upgrade.
