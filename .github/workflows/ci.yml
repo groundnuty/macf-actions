@@ -65,7 +65,8 @@ jobs:
     # (code-context strip, endpoint-transform, PR-review recipient-set actor
     # exclusion, CA-cert resolution precedence, routing-bundle unpack per
     # groundnuty/macf-actions#1169, pick-runner declared-self-hosted
-    # enforcement per groundnuty/macf-actions#81). Run via `bash` so they
+    # enforcement per groundnuty/macf-actions#81, pick-runner secrets
+    # preflight per groundnuty/macf-actions#82). Run via `bash` so they
     # don't depend on the +x bit.
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -76,7 +77,8 @@ jobs:
                    test/pr-review-recipient-actor-exclusion.sh \
                    test/ca-cert-resolution.sh \
                    test/routing-bundle-unpack.sh \
-                   test/pick-runner-decision.sh; do
+                   test/pick-runner-decision.sh \
+                   test/pick-runner-secrets-preflight.sh; do
             echo "── $t ──"
             bash "$t"
           done
