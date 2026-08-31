@@ -29,9 +29,17 @@ All notable changes to this project will be documented in this file. The format 
   (`groundnuty/macf#806`), and a CA rotation left every already-provisioned repo pinned
   to the superseded cert with no signal (`groundnuty/macf#800`) — the router kept
   presenting a client cert its peer no longer trusted, which surfaces as a connection
-  failure rather than as "your CA is stale". Reading the registry as the primary source
-  makes rotation take effect without touching each repo; the repo-variable fallback
-  keeps pre-existing fleets working unchanged.
+  failure rather than as "your CA is stale". The repo-variable fallback keeps
+  pre-existing fleets working unchanged.
+
+  **The rotation benefit is CONDITIONAL on `registry-api-path` being fleet-scoped.**
+  That input is configurable (DR-006: `/orgs/<org>`, a profile repo, or any repo), and
+  the registry read is literally `${REG_PATH}/actions/variables/<SEG>_CA_CERT`. Where a
+  fleet points each agent's `registry-api-path` at that agent's OWN repo — which is how
+  both `macf-experiment` fleets are configured today — the registry read and the
+  repo-variable fallback resolve **the same store**, so rotation still requires touching
+  every repo. Point `registry-api-path` at a shared scope to get the single-source
+  property this feature enables.
  — matches `groundnuty/macf`'s `MIN_BUNDLE_CAPABLE_ACTIONS_VERSION` gate
 
 - **Every `route-by-*` job now accepts `MACF_ROUTING_BUNDLE`** — a single `base64(JSON)` secret bundling the six routing secrets below, keyed by their own names ([groundnuty/macf#1112](https://github.com/groundnuty/macf/issues/1112) / [#1118](https://github.com/groundnuty/macf/pull/1118) / [groundnuty/macf-actions#1169](https://github.com/groundnuty/macf-actions/issues/1169)). A caller supplying the bundle needs no other routing secret, and its generated `secrets:` block never has to change again when this workflow's secret set changes — closing the class of bug where a caller generated before a secret-set change fails with `Secret X is required, but not provided` on a stale caller.
