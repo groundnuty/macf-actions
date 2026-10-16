@@ -702,6 +702,40 @@ jobs:
           # it as a subset-request and 422'd with "permissions not
           # granted to this installation". See groundnuty/macf-actions#20.
 
+      - name: Ensure gh CLI (self-hosted runner images may not ship it — groundnuty/macf#1498)
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_CLI_VERSION: 2.101.0
+          GH_CLI_SHA256_AMD64: 9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+          GH_CLI_SHA256_ARM64: b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            echo "gh present: $(gh --version | head -n 1)"
+            exit 0
+          fi
+          if [ "$(uname -s)" != "Linux" ]; then
+            echo "::error::gh is not installed on this runner and the router installs it only on Linux. Install gh on the runner image."
+            exit 1
+          fi
+          case "$(uname -m)" in
+            x86_64|amd64) arch=amd64; sum="$GH_CLI_SHA256_AMD64" ;;
+            aarch64|arm64) arch=arm64; sum="$GH_CLI_SHA256_ARM64" ;;
+            *) echo "::error::gh is not installed on this runner and the router has no pinned build for $(uname -m). Install gh on the runner image."; exit 1 ;;
+          esac
+          name="gh_${GH_CLI_VERSION}_linux_${arch}"
+          dir="${RUNNER_TEMP}/gh-cli"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/$name.tar.gz" \
+            "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/${name}.tar.gz"
+          if ! printf '%s  %s\n' "$sum" "$dir/$name.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+            echo "::error::The gh ${GH_CLI_VERSION} download failed its sha256 check; refusing to run it."
+            exit 1
+          fi
+          tar -xzf "$dir/$name.tar.gz" -C "$dir"
+          echo "$dir/$name/bin" >> "$GITHUB_PATH"
+          echo "gh installed: $("$dir/$name/bin/gh" --version | head -n 1)"
       - name: Resolve project CA cert (registry primary, repo-var fallback)
         id: ca-cert
         if: steps.gate.outputs.skip != 'true'
@@ -1097,6 +1131,39 @@ jobs:
           # it as a subset-request and 422'd with "permissions not
           # granted to this installation". See groundnuty/macf-actions#20.
 
+      - name: Ensure gh CLI (self-hosted runner images may not ship it — groundnuty/macf#1498)
+        shell: bash
+        env:
+          GH_CLI_VERSION: 2.101.0
+          GH_CLI_SHA256_AMD64: 9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+          GH_CLI_SHA256_ARM64: b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            echo "gh present: $(gh --version | head -n 1)"
+            exit 0
+          fi
+          if [ "$(uname -s)" != "Linux" ]; then
+            echo "::error::gh is not installed on this runner and the router installs it only on Linux. Install gh on the runner image."
+            exit 1
+          fi
+          case "$(uname -m)" in
+            x86_64|amd64) arch=amd64; sum="$GH_CLI_SHA256_AMD64" ;;
+            aarch64|arm64) arch=arm64; sum="$GH_CLI_SHA256_ARM64" ;;
+            *) echo "::error::gh is not installed on this runner and the router has no pinned build for $(uname -m). Install gh on the runner image."; exit 1 ;;
+          esac
+          name="gh_${GH_CLI_VERSION}_linux_${arch}"
+          dir="${RUNNER_TEMP}/gh-cli"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/$name.tar.gz" \
+            "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/${name}.tar.gz"
+          if ! printf '%s  %s\n' "$sum" "$dir/$name.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+            echo "::error::The gh ${GH_CLI_VERSION} download failed its sha256 check; refusing to run it."
+            exit 1
+          fi
+          tar -xzf "$dir/$name.tar.gz" -C "$dir"
+          echo "$dir/$name/bin" >> "$GITHUB_PATH"
+          echo "gh installed: $("$dir/$name/bin/gh" --version | head -n 1)"
       - name: Resolve project CA cert (registry primary, repo-var fallback)
         id: ca-cert
         # macf-actions#66: see route-by-label's identically-named step for
@@ -1499,6 +1566,39 @@ jobs:
           # it as a subset-request and 422'd with "permissions not
           # granted to this installation". See groundnuty/macf-actions#20.
 
+      - name: Ensure gh CLI (self-hosted runner images may not ship it — groundnuty/macf#1498)
+        shell: bash
+        env:
+          GH_CLI_VERSION: 2.101.0
+          GH_CLI_SHA256_AMD64: 9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+          GH_CLI_SHA256_ARM64: b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            echo "gh present: $(gh --version | head -n 1)"
+            exit 0
+          fi
+          if [ "$(uname -s)" != "Linux" ]; then
+            echo "::error::gh is not installed on this runner and the router installs it only on Linux. Install gh on the runner image."
+            exit 1
+          fi
+          case "$(uname -m)" in
+            x86_64|amd64) arch=amd64; sum="$GH_CLI_SHA256_AMD64" ;;
+            aarch64|arm64) arch=arm64; sum="$GH_CLI_SHA256_ARM64" ;;
+            *) echo "::error::gh is not installed on this runner and the router has no pinned build for $(uname -m). Install gh on the runner image."; exit 1 ;;
+          esac
+          name="gh_${GH_CLI_VERSION}_linux_${arch}"
+          dir="${RUNNER_TEMP}/gh-cli"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/$name.tar.gz" \
+            "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/${name}.tar.gz"
+          if ! printf '%s  %s\n' "$sum" "$dir/$name.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+            echo "::error::The gh ${GH_CLI_VERSION} download failed its sha256 check; refusing to run it."
+            exit 1
+          fi
+          tar -xzf "$dir/$name.tar.gz" -C "$dir"
+          echo "$dir/$name/bin" >> "$GITHUB_PATH"
+          echo "gh installed: $("$dir/$name/bin/gh" --version | head -n 1)"
       - name: Resolve project CA cert (registry primary, repo-var fallback)
         id: ca-cert
         # macf-actions#66: see route-by-label's identically-named step for
@@ -1888,6 +1988,39 @@ jobs:
           private-key: ${{ env.MACF_ROUTING_APP_KEY }}
           owner: ${{ github.repository_owner }}
 
+      - name: Ensure gh CLI (self-hosted runner images may not ship it — groundnuty/macf#1498)
+        shell: bash
+        env:
+          GH_CLI_VERSION: 2.101.0
+          GH_CLI_SHA256_AMD64: 9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+          GH_CLI_SHA256_ARM64: b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            echo "gh present: $(gh --version | head -n 1)"
+            exit 0
+          fi
+          if [ "$(uname -s)" != "Linux" ]; then
+            echo "::error::gh is not installed on this runner and the router installs it only on Linux. Install gh on the runner image."
+            exit 1
+          fi
+          case "$(uname -m)" in
+            x86_64|amd64) arch=amd64; sum="$GH_CLI_SHA256_AMD64" ;;
+            aarch64|arm64) arch=arm64; sum="$GH_CLI_SHA256_ARM64" ;;
+            *) echo "::error::gh is not installed on this runner and the router has no pinned build for $(uname -m). Install gh on the runner image."; exit 1 ;;
+          esac
+          name="gh_${GH_CLI_VERSION}_linux_${arch}"
+          dir="${RUNNER_TEMP}/gh-cli"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/$name.tar.gz" \
+            "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/${name}.tar.gz"
+          if ! printf '%s  %s\n' "$sum" "$dir/$name.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+            echo "::error::The gh ${GH_CLI_VERSION} download failed its sha256 check; refusing to run it."
+            exit 1
+          fi
+          tar -xzf "$dir/$name.tar.gz" -C "$dir"
+          echo "$dir/$name/bin" >> "$GITHUB_PATH"
+          echo "gh installed: $("$dir/$name/bin/gh" --version | head -n 1)"
       - name: Resolve project CA cert (registry primary, repo-var fallback)
         id: ca-cert
         # macf-actions#66: see route-by-label's identically-named step for
@@ -2132,6 +2265,39 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Ensure gh CLI (self-hosted runner images may not ship it — groundnuty/macf#1498)
+        shell: bash
+        env:
+          GH_CLI_VERSION: 2.101.0
+          GH_CLI_SHA256_AMD64: 9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+          GH_CLI_SHA256_ARM64: b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            echo "gh present: $(gh --version | head -n 1)"
+            exit 0
+          fi
+          if [ "$(uname -s)" != "Linux" ]; then
+            echo "::error::gh is not installed on this runner and the router installs it only on Linux. Install gh on the runner image."
+            exit 1
+          fi
+          case "$(uname -m)" in
+            x86_64|amd64) arch=amd64; sum="$GH_CLI_SHA256_AMD64" ;;
+            aarch64|arm64) arch=arm64; sum="$GH_CLI_SHA256_ARM64" ;;
+            *) echo "::error::gh is not installed on this runner and the router has no pinned build for $(uname -m). Install gh on the runner image."; exit 1 ;;
+          esac
+          name="gh_${GH_CLI_VERSION}_linux_${arch}"
+          dir="${RUNNER_TEMP}/gh-cli"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/$name.tar.gz" \
+            "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/${name}.tar.gz"
+          if ! printf '%s  %s\n' "$sum" "$dir/$name.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+            echo "::error::The gh ${GH_CLI_VERSION} download failed its sha256 check; refusing to run it."
+            exit 1
+          fi
+          tar -xzf "$dir/$name.tar.gz" -C "$dir"
+          echo "$dir/$name/bin" >> "$GITHUB_PATH"
+          echo "gh installed: $("$dir/$name/bin/gh" --version | head -n 1)"
       - name: Remove status labels
         env:
           ISSUE_NUMBER: ${{ github.event.issue.number }}

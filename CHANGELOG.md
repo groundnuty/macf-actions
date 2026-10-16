@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [3.6.1] — 2026-10-16
+
+### Fixed
+
+- **Router jobs run on a self-hosted runner whose image has no `gh`** (`groundnuty/macf#1498`).
+  The ARC runner image ships `jq` and `curl` but not `gh`, and five jobs (`route-by-label`,
+  `route-by-mention`, `route-by-ci-completion`, `route-by-pr-review-state`, `cleanup-labels`)
+  call it: every delivery from an agent repo's own runner failed with `gh: command not found`,
+  and the CA step quietly fell back to the per-repo variable. Each job now runs an "Ensure gh
+  CLI" step before its first `gh` call: when `gh` is absent it installs pinned `gh` 2.101.0 for
+  the runner's architecture, verified against pinned sha256 values, and fails loudly on a
+  checksum mismatch or a non-Linux runner. Runners that already have `gh` are unchanged.
+
 ## [3.6.0] — 2026-10-16
 
 ### Fixed
