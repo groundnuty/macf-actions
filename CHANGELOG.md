@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [3.6.1] — 2026-10-16
+
 ### Fixed
 
 - **Router jobs run on a self-hosted runner whose image has no `gh`** (`groundnuty/macf#1498`).
