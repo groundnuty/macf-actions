@@ -326,7 +326,8 @@ jobs:
             (github.event_name == 'issue_comment') ||
             (github.event_name == 'pull_request') ||
             (github.event_name == 'pull_request_review') ||
-            (github.event_name == 'check_suite' && github.event.action == 'completed')
+            (github.event_name == 'check_suite' && github.event.action == 'completed') ||
+            (github.event_name == 'workflow_run' && github.event.action == 'completed')
           )
         env:
           BUNDLE: ${{ secrets.MACF_ROUTING_BUNDLE }}
@@ -1259,9 +1260,25 @@ jobs:
   # ─── CI COMPLETION ROUTING ───
   route-by-ci-completion:
     needs: [config, pick-runner]
+    # Two triggers feed this job (groundnuty/macf#1479):
+    #   - `check_suite: completed` — third-party CI (GitHub Apps) only.
+    #     GitHub's docs: the check_suite event "does not trigger workflows
+    #     if the check suite was created by GitHub Actions", so it never
+    #     fires for Actions CI.
+    #   - `workflow_run: completed` — Actions CI. The caller lists the CI
+    #     workflows in `workflow_run.workflows`.
+    # The router's OWN workflow ("Agent Router", agent-router.yml) is
+    # excluded here as a loop guard even if a caller lists it: routing a
+    # completion of the router would itself produce a router run.
     if: >
-      (github.event_name == 'check_suite') &&
-      (github.event.action == 'completed')
+      (
+        (github.event_name == 'check_suite') &&
+        (github.event.action == 'completed')
+      ) || (
+        (github.event_name == 'workflow_run') &&
+        (github.event.action == 'completed') &&
+        (github.event.workflow_run.path != '.github/workflows/agent-router.yml')
+      )
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}
     env:
       AGENTS: ${{ needs.config.outputs.agents }}
@@ -1270,9 +1287,17 @@ jobs:
       # step below) is now the primary source, same as host/port.
       PROJECT_CA_CERT_REPO_VAR_FALLBACK: ${{ vars[format('{0}_CA_CERT', needs.config.outputs.project-seg)] }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      CHECK_SUITE_ID: ${{ github.event.check_suite.id }}
-      CHECK_SUITE_HEAD_SHA: ${{ github.event.check_suite.head_sha }}
-      CHECK_SUITE_CONCLUSION: ${{ github.event.check_suite.conclusion }}
+      # check_suite and workflow_run carry the same three facts under
+      # different names; the `||` picks whichever event fired. A
+      # workflow_run's `check_suite_id` is the suite that holds its jobs,
+      # so the failing-check lookup below is the same call for both events.
+      CHECK_SUITE_ID: ${{ github.event.check_suite.id || github.event.workflow_run.check_suite_id }}
+      CHECK_SUITE_HEAD_SHA: ${{ github.event.check_suite.head_sha || github.event.workflow_run.head_sha }}
+      CHECK_SUITE_CONCLUSION: ${{ github.event.check_suite.conclusion || github.event.workflow_run.conclusion }}
+      # workflow_run only: the PRs GitHub attached to the run (JSON array;
+      # "null" on check_suite). May be empty (e.g. a fork PR) — the PR
+      # resolution step falls back to the head-SHA lookup.
+      WORKFLOW_RUN_PRS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
       REPO: ${{ github.repository }}
       PROJECT_SEG: ${{ needs.config.outputs.project-seg }}
     steps:
@@ -1511,7 +1536,14 @@ jobs:
             *) echo "Conclusion '$CHECK_SUITE_CONCLUSION' not actionable; skipping"; exit 0 ;;
           esac
 
-          PR_NUMBERS=$(gh api "/repos/${REPO}/commits/${CHECK_SUITE_HEAD_SHA}/pulls" --jq '.[] | .number')
+          # PR resolution: a workflow_run names its PRs directly; use them
+          # when present, else (check_suite, or a workflow_run whose
+          # pull_requests is empty/null) resolve by head SHA. The staleness
+          # guard below still compares each PR's current head to the SHA.
+          PR_NUMBERS=$(printf '%s' "${WORKFLOW_RUN_PRS:-null}" | jq -r '.[]?.number' 2>/dev/null || true)
+          if [ -z "$PR_NUMBERS" ]; then
+            PR_NUMBERS=$(gh api "/repos/${REPO}/commits/${CHECK_SUITE_HEAD_SHA}/pulls" --jq '.[] | .number')
+          fi
           [ -z "$PR_NUMBERS" ] && { echo "No PR for SHA ${CHECK_SUITE_HEAD_SHA}; skipping"; exit 0; }
 
           TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
@@ -1532,7 +1564,7 @@ jobs:
             # on the OLD head_sha. If it completes after new CI started, the
             # notification would reference outdated status. See #6 body for
             # the force-push race-condition write-up.
-            [ "$PR_HEAD_SHA" != "$CHECK_SUITE_HEAD_SHA" ] && { echo "PR #${PR_NUMBER} HEAD moved past ${CHECK_SUITE_HEAD_SHA} (now ${PR_HEAD_SHA}); skipping stale check_suite"; continue; }
+            [ "$PR_HEAD_SHA" != "$CHECK_SUITE_HEAD_SHA" ] && { echo "PR #${PR_NUMBER} HEAD moved past ${CHECK_SUITE_HEAD_SHA} (now ${PR_HEAD_SHA}); skipping stale CI completion"; continue; }
             [ "$PR_STATE" != "open" ] && { echo "PR #${PR_NUMBER} state=${PR_STATE}; skipping"; continue; }
             [ "$PR_DRAFT" = "true" ] && { echo "PR #${PR_NUMBER} is a draft; skipping"; continue; }
 
