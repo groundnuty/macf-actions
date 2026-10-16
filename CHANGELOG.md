@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [3.6.0] — 2026-10-16
+
 ### Fixed
 
 - **CI-completion routing now fires for GitHub Actions CI** (`groundnuty/macf#1479`).
@@ -15,7 +17,7 @@ All notable changes to this project will be documented in this file. The format 
   `ci_completion` payload are unchanged. The router's own workflow run is skipped
   (`workflow_run.path`) so there is no loop. `check_suite` stays for third-party CI.
   Callers must add a `workflow_run` trigger listing their CI workflows; `pick-runner`'s
-  secrets precondition covers the new event. Needs a new tag (v3.6.0) before callers pin it.
+  secrets precondition covers the new event.
 
 ## [3.5.0] — 2026-08-31
 
