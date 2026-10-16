@@ -78,7 +78,8 @@ jobs:
                    test/ca-cert-resolution.sh \
                    test/routing-bundle-unpack.sh \
                    test/pick-runner-decision.sh \
-                   test/pick-runner-secrets-preflight.sh; do
+                   test/pick-runner-secrets-preflight.sh \
+                   test/ci-completion-pr-resolution.sh; do
             echo "── $t ──"
             bash "$t"
           done
