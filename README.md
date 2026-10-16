@@ -19,7 +19,10 @@ on:
   issue_comment: { types: [created] }
   pull_request: { types: [opened] }
   pull_request_review: { types: [submitted] }
-  check_suite: { types: [completed] }
+  check_suite: { types: [completed] }   # third-party CI (GitHub Apps) only
+  workflow_run:                          # Actions CI — list YOUR CI workflow names
+    workflows: [CI]
+    types: [completed]
 permissions:
   contents: read
   issues: write
@@ -32,6 +35,8 @@ jobs:
       project: your-project-name  # e.g. academic-resume
     secrets: inherit
 ```
+
+**CI-completion routing needs `workflow_run`, not just `check_suite`.** GitHub does not trigger workflows from check suites created by GitHub Actions, so the `check_suite` trigger only ever fires for third-party CI. For Actions CI, subscribe to `workflow_run` with `workflows:` set to the exact `name:` of each CI workflow (a repo with no CI omits the block). Never list `Agent Router` itself: the router skips its own `workflow_run`, but listing it would still start a pointless run. `workflow_run` only fires once the caller file is on the default branch, and a repo with several CI workflows routes one notification per workflow run. Requires a `macf-actions` tag that carries this handling (`v3.6.0`+); an older pin ignores the event.
 
 `project` drives the registry variable-name convention (`<PROJECT>_AGENT_<NAME>` for agent endpoints, `<PROJECT>_CA_CERT` for the CA) — match the `project` field your agent writes to `.macf/macf-agent.json`.
 

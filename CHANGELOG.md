@@ -4,7 +4,18 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
-(no unreleased changes)
+### Fixed
+
+- **CI-completion routing now fires for GitHub Actions CI** (`groundnuty/macf#1479`).
+  `route-by-ci-completion` listened only on `check_suite: completed`, and GitHub does not
+  trigger workflows from check suites created by GitHub Actions, so it never ran for
+  Actions CI (`groundnuty/macf` had 0 `check_suite` runs in six months). The job now also
+  accepts `workflow_run: completed`: PRs come from `workflow_run.pull_requests`, falling
+  back to the head-SHA lookup; the staleness guard, agent-author check, routed line and
+  `ci_completion` payload are unchanged. The router's own workflow run is skipped
+  (`workflow_run.path`) so there is no loop. `check_suite` stays for third-party CI.
+  Callers must add a `workflow_run` trigger listing their CI workflows; `pick-runner`'s
+  secrets precondition covers the new event. Needs a new tag (v3.6.0) before callers pin it.
 
 ## [3.5.0] — 2026-08-31
 
