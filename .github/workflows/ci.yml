@@ -79,7 +79,8 @@ jobs:
                    test/routing-bundle-unpack.sh \
                    test/pick-runner-decision.sh \
                    test/pick-runner-secrets-preflight.sh \
-                   test/ci-completion-pr-resolution.sh; do
+                   test/ci-completion-pr-resolution.sh \
+                   test/ensure-gh-cli.sh; do
             echo "── $t ──"
             bash "$t"
           done
