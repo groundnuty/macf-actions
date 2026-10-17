@@ -231,13 +231,13 @@ jobs:
   # pick-runner itself runs on the declared runner (groundnuty/macf#1497):
   # when the caller declares runner-runs-on: self-hosted it runs on the same
   # [self-hosted, macf-vm] labels it emits for a trusted actor, so a routed
-  # event spends no metered GitHub-hosted job. Otherwise it runs on
-  # ubuntu-latest, as before. The job has no checkout and makes no GitHub
+  # event spends no metered GitHub-hosted job. A fork PR is never scheduled
+  # there: it stays on ubuntu-latest, as does a caller that declares nothing. The job has no checkout and makes no GitHub
   # CLI or network call: it reads vars, event fields and the routing secrets
   # as env values only. An untrusted actor is still refused by the pick step
   # below before any routing job runs.
   pick-runner:
-    runs-on: ${{ inputs.runner-runs-on == 'self-hosted' && fromJSON('["self-hosted","macf-vm"]') || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner-runs-on == 'self-hosted' && github.event.pull_request.head.repo.fork != true && fromJSON('["self-hosted","macf-vm"]') || 'ubuntu-latest' }}
     outputs:
       labels: ${{ steps.pick.outputs.labels }}
     steps:

@@ -254,11 +254,13 @@ fi
 
 # ── Structural check (groundnuty/macf#1497): pick-runner itself runs on the
 #    declared runner, with the same labels it emits for a trusted actor, and
-#    its pick step still carries the untrusted-actor refusal. Read from the
+#    its pick step still carries the untrusted-actor refusal. A fork event is
+#    never scheduled onto the self-hosted runner: it stays hosted, so its
+#    downgrade below is not preceded by a VM job. Read from the
 #    workflow file, not from a replica. ──
 wf="$(cd "$(dirname "$0")" && pwd)/../.github/workflows/agent-router.yml"
 job=$(awk '/^  pick-runner:/{f=1;print;next} f && /^  [a-z][a-z-]*:/{exit} f{print}' "$wf")
-want="runs-on: \${{ inputs.runner-runs-on == 'self-hosted' && fromJSON('[\"self-hosted\",\"macf-vm\"]') || 'ubuntu-latest' }}"
+want="runs-on: \${{ inputs.runner-runs-on == 'self-hosted' && github.event.pull_request.head.repo.fork != true && fromJSON('[\"self-hosted\",\"macf-vm\"]') || 'ubuntu-latest' }}"
 if printf '%s\n' "$job" | grep -qF "$want"; then
   echo "ok: pick-runner runs-on is the declared-runner expression"
 else
