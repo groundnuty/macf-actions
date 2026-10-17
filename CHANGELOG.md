@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [3.6.2] — 2026-10-17
+
+### Fixed
+
+- **`pick-runner` runs on the declared runner** (`groundnuty/macf#1497`). It was always
+  `runs-on: ubuntu-latest`, so every routed event spent a metered GitHub-hosted job even for a
+  caller that declares `runner-runs-on: self-hosted`. It now runs on `[self-hosted, macf-vm]`
+  in that case, and on `ubuntu-latest` otherwise. The job has no checkout and no `gh` call, and
+  an untrusted actor is still refused before any routing job runs.
+- **The CA lookup tells a not-found from a failure** (`groundnuty/macf#1498` follow-up). The
+  "Resolve project CA cert" step treated any `gh` failure (auth, network, rate limit) as a
+  registry miss and silently used the per-repo variable. Only an `HTTP 404` now falls back; any
+  other failure exits 1 with `Could not read <PROJECT>_CA_CERT from the registry (...); refusing
+  to guess.`
+
 ## [3.6.1] — 2026-10-16
 
 ### Fixed

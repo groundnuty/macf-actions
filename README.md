@@ -42,7 +42,7 @@ jobs:
 
 Optional input: `registry-api-path` (default `/orgs/${{ github.repository_owner }}`) — override for DR-006 profile scope (`/repos/<user>/<user>`) or cross-org registries.
 
-Optional input: `runner-runs-on` (default `''`) — mirrors your fleet manifest's `routing.runner.runs_on` verbatim (groundnuty/macf-actions#81). Set it to `self-hosted` for a fleet that MUST run on your own runner: `pick-runner` then FAILS the job — naming the actor, the `MACF_TRUSTED_ACTORS` variable, and the repo — instead of silently relocating to a metered `ubuntu-latest` runner when the triggering actor isn't trusted. Leave it unset (or `hosted`) to keep the pre-#81 behaviour exactly — including the fork-PR downgrade, which always applies regardless of this input.
+Optional input: `runner-runs-on` (default `''`) — mirrors your fleet manifest's `routing.runner.runs_on` verbatim (groundnuty/macf-actions#81). Set it to `self-hosted` for a fleet that MUST run on your own runner: `pick-runner` then FAILS the job — naming the actor, the `MACF_TRUSTED_ACTORS` variable, and the repo — instead of silently relocating to a metered `ubuntu-latest` runner when the triggering actor isn't trusted. Leave it unset (or `hosted`) to keep the pre-#81 behaviour exactly — including the fork-PR downgrade, which always applies regardless of this input. With `self-hosted` declared, `pick-runner` itself also runs on the `[self-hosted, macf-vm]` runner rather than a metered GitHub-hosted one (`groundnuty/macf#1497`), except for a fork PR, which stays hosted; it has no checkout and no `gh` call, and still refuses an untrusted actor before any routing job runs.
 
 ```yaml
     with:

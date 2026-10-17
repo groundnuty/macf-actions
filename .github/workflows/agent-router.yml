@@ -227,8 +227,17 @@ jobs:
   # devops RUNNER.md). Trust is decided from github.actor + head.repo.fork,
   # both GitHub-set (not spoofable). Every downstream job derives runs-on
   # from this job's output.
+  #
+  # pick-runner itself runs on the declared runner (groundnuty/macf#1497):
+  # when the caller declares runner-runs-on: self-hosted it runs on the same
+  # [self-hosted, macf-vm] labels it emits for a trusted actor, so a routed
+  # event spends no metered GitHub-hosted job. A fork PR is never scheduled
+  # there: it stays on ubuntu-latest, as does a caller that declares nothing. The job has no checkout and makes no GitHub
+  # CLI or network call: it reads vars, event fields and the routing secrets
+  # as env values only. An untrusted actor is still refused by the pick step
+  # below before any routing job runs.
   pick-runner:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner-runs-on == 'self-hosted' && github.event.pull_request.head.repo.fork != true && fromJSON('["self-hosted","macf-vm"]') || 'ubuntu-latest' }}
     outputs:
       labels: ${{ steps.pick.outputs.labels }}
     steps:
@@ -755,7 +764,18 @@ jobs:
         run: |
           set -euo pipefail
           CA_PATH=$(mktemp "${RUNNER_TEMP}/project-ca.XXXXXX.pem")
-          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>/dev/null) && [ -n "$REGISTRY_CA" ]; then
+          REG_ERR=$(mktemp "${RUNNER_TEMP}/ca-lookup-err.XXXXXX")
+          REGISTRY_CA=""
+          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>"$REG_ERR"); then
+            REG_RC=0
+          else
+            REG_RC=$?
+          fi
+          if [ "$REG_RC" -ne 0 ] && ! grep -q 'HTTP 404' "$REG_ERR"; then
+            echo "::error::Could not read ${PROJECT_SEG}_CA_CERT from the registry ($(head -n 1 "$REG_ERR")); refusing to guess." >&2
+            exit 1
+          fi
+          if [ "$REG_RC" -eq 0 ] && [ -n "$REGISTRY_CA" ]; then
             printf '%s' "$REGISTRY_CA" > "$CA_PATH"
             echo "CA cert resolved from registry (${PROJECT_SEG}_CA_CERT)"
           elif [ -n "${PROJECT_CA_CERT_REPO_VAR_FALLBACK:-}" ]; then
@@ -1176,7 +1196,18 @@ jobs:
         run: |
           set -euo pipefail
           CA_PATH=$(mktemp "${RUNNER_TEMP}/project-ca.XXXXXX.pem")
-          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>/dev/null) && [ -n "$REGISTRY_CA" ]; then
+          REG_ERR=$(mktemp "${RUNNER_TEMP}/ca-lookup-err.XXXXXX")
+          REGISTRY_CA=""
+          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>"$REG_ERR"); then
+            REG_RC=0
+          else
+            REG_RC=$?
+          fi
+          if [ "$REG_RC" -ne 0 ] && ! grep -q 'HTTP 404' "$REG_ERR"; then
+            echo "::error::Could not read ${PROJECT_SEG}_CA_CERT from the registry ($(head -n 1 "$REG_ERR")); refusing to guess." >&2
+            exit 1
+          fi
+          if [ "$REG_RC" -eq 0 ] && [ -n "$REGISTRY_CA" ]; then
             printf '%s' "$REGISTRY_CA" > "$CA_PATH"
             echo "CA cert resolved from registry (${PROJECT_SEG}_CA_CERT)"
           elif [ -n "${PROJECT_CA_CERT_REPO_VAR_FALLBACK:-}" ]; then
@@ -1611,7 +1642,18 @@ jobs:
         run: |
           set -euo pipefail
           CA_PATH=$(mktemp "${RUNNER_TEMP}/project-ca.XXXXXX.pem")
-          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>/dev/null) && [ -n "$REGISTRY_CA" ]; then
+          REG_ERR=$(mktemp "${RUNNER_TEMP}/ca-lookup-err.XXXXXX")
+          REGISTRY_CA=""
+          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>"$REG_ERR"); then
+            REG_RC=0
+          else
+            REG_RC=$?
+          fi
+          if [ "$REG_RC" -ne 0 ] && ! grep -q 'HTTP 404' "$REG_ERR"; then
+            echo "::error::Could not read ${PROJECT_SEG}_CA_CERT from the registry ($(head -n 1 "$REG_ERR")); refusing to guess." >&2
+            exit 1
+          fi
+          if [ "$REG_RC" -eq 0 ] && [ -n "$REGISTRY_CA" ]; then
             printf '%s' "$REGISTRY_CA" > "$CA_PATH"
             echo "CA cert resolved from registry (${PROJECT_SEG}_CA_CERT)"
           elif [ -n "${PROJECT_CA_CERT_REPO_VAR_FALLBACK:-}" ]; then
@@ -2033,7 +2075,18 @@ jobs:
         run: |
           set -euo pipefail
           CA_PATH=$(mktemp "${RUNNER_TEMP}/project-ca.XXXXXX.pem")
-          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>/dev/null) && [ -n "$REGISTRY_CA" ]; then
+          REG_ERR=$(mktemp "${RUNNER_TEMP}/ca-lookup-err.XXXXXX")
+          REGISTRY_CA=""
+          if REGISTRY_CA=$(gh api "${REG_PATH}/actions/variables/${PROJECT_SEG}_CA_CERT" --jq '.value' 2>"$REG_ERR"); then
+            REG_RC=0
+          else
+            REG_RC=$?
+          fi
+          if [ "$REG_RC" -ne 0 ] && ! grep -q 'HTTP 404' "$REG_ERR"; then
+            echo "::error::Could not read ${PROJECT_SEG}_CA_CERT from the registry ($(head -n 1 "$REG_ERR")); refusing to guess." >&2
+            exit 1
+          fi
+          if [ "$REG_RC" -eq 0 ] && [ -n "$REGISTRY_CA" ]; then
             printf '%s' "$REGISTRY_CA" > "$CA_PATH"
             echo "CA cert resolved from registry (${PROJECT_SEG}_CA_CERT)"
           elif [ -n "${PROJECT_CA_CERT_REPO_VAR_FALLBACK:-}" ]; then
