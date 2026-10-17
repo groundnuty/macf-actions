@@ -252,6 +252,39 @@ else
   fail=1
 fi
 
+# ── Structural check (groundnuty/macf#1497): pick-runner itself runs on the
+#    declared runner, with the same labels it emits for a trusted actor, and
+#    its pick step still carries the untrusted-actor refusal. Read from the
+#    workflow file, not from a replica. ──
+wf="$(cd "$(dirname "$0")" && pwd)/../.github/workflows/agent-router.yml"
+job=$(awk '/^  pick-runner:/{f=1;print;next} f && /^  [a-z][a-z-]*:/{exit} f{print}' "$wf")
+want="runs-on: \${{ inputs.runner-runs-on == 'self-hosted' && fromJSON('[\"self-hosted\",\"macf-vm\"]') || 'ubuntu-latest' }}"
+if printf '%s\n' "$job" | grep -qF "$want"; then
+  echo "ok: pick-runner runs-on is the declared-runner expression"
+else
+  echo "FAIL: pick-runner runs-on is not the declared-runner expression" >&2
+  fail=1
+fi
+if printf '%s\n' "$job" | grep -qF "labels='[\"self-hosted\",\"macf-vm\"]'"; then
+  echo "ok: the runs-on label list matches the labels the pick step emits for a trusted actor"
+else
+  echo "FAIL: the pick step no longer emits [self-hosted, macf-vm] for a trusted actor" >&2
+  fail=1
+fi
+if printf '%s\n' "$job" | grep -qF 'refusing to fall back to a metered ubuntu-latest runner' \
+   && printf '%s\n' "$job" | grep -qF 'exit 1'; then
+  echo "ok: the pick step still refuses an untrusted actor"
+else
+  echo "FAIL: the untrusted-actor refusal is missing from the pick-runner job" >&2
+  fail=1
+fi
+if printf '%s\n' "$job" | grep -qE 'actions/checkout|^\s+run:.*\bgh (api|pr|issue|run)\b'; then
+  echo "FAIL: pick-runner has gained a checkout or a gh call" >&2
+  fail=1
+else
+  echo "ok: pick-runner has no checkout and no gh call"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: canonical-vector test failed" >&2
   exit 1

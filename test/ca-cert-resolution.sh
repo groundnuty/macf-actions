@@ -1,92 +1,138 @@
 #!/usr/bin/env bash
-# Canonical-vector test for the CA-cert resolution PRECEDENCE logic
-# inlined in .github/workflows/agent-router.yml's "Resolve project CA
-# cert (registry primary, repo-var fallback)" step — identical in all
-# four route-by-* jobs (route-by-label, route-by-mention,
-# route-by-ci-completion, route-by-pr-review-state) per macf-actions#66.
+# Test for the CA-cert resolution step in .github/workflows/agent-router.yml,
+# "Resolve project CA cert (registry primary, repo-var fallback)" (macf-actions#66,
+# and the groundnuty/macf#1498 follow-up: tell a 404 from any other failure).
 #
-# The real step's `gh api .../actions/variables/<SEG>_CA_CERT` registry
-# call can't be exercised outside a live registry — same "transform-
-# contract, not full step" scope as test/resolve-agent-endpoint-
-# transform.sh (see that file's header). This test isolates the
-# PRECEDENCE + FAILURE-MODE decision only: given an already-resolved
-# registry lookup result and an already-resolved repo-var-fallback
-# value, which one wins, and does both-empty fail loud. Full end-to-end
-# coverage (the actual `gh api` call, `mktemp`, $GITHUB_OUTPUT write) is
-# exercised via the live external-caller path, not this vector test.
-#
-# Keep resolve_ca() here in lockstep with the workflow step's shell body
-# if either changes — no shared source, same manual-sync convention as
-# test/pr-review-recipient-actor-exclusion.sh's build_recipients().
+# The test EXTRACTS the step's real `run:` block from the workflow (every copy,
+# and requires them to be identical), then runs it with a fake `gh` on PATH.
+# Cases:
+#   - 200 with a value            -> registry wins
+#   - 404 (HTTP 404 on stderr)    -> repo-var fallback, with the warning
+#   - 401 / any other failure     -> exit 1 with the "refusing to guess" error,
+#                                    even when a fallback variable is set
+#   - 200 with an empty value     -> treated like a miss (fallback / loud fail)
+#   - 404 and no fallback         -> loud fail
+# Mutation (at the bottom): treat every failure as a miss again -> the 401
+# case must then NOT fail, proving it is a real guard.
 
 set -euo pipefail
 
-# Mirrors the workflow step's if/elif/else precedence + failure mode
-# exactly (registry primary, repo-var-fallback transitional, both-empty
-# loud-fail — macf-actions#66 / groundnuty/macf#799/#806). $1 = simulated
-# registry lookup result (empty string = registry miss, same as the real
-# step's `gh api ... --jq '.value'` returning empty or the command
-# failing under `2>/dev/null`). $2 = simulated
-# PROJECT_CA_CERT_REPO_VAR_FALLBACK env value (empty = no repo var set).
-# On success, prints the resolved PEM to stdout and returns 0 — the
-# real step instead writes to a mktemp'd file and returns the path via
-# $GITHUB_OUTPUT, but the CONTENT + WHICH-BRANCH-FIRED decision is
-# identical. On both-empty, prints nothing and returns 1 (mirrors the
-# real step's `exit 1`).
-resolve_ca() {
-  local registry_ca=$1 repo_var_fallback=$2
-  if [ -n "$registry_ca" ]; then
-    printf '%s' "$registry_ca"
-    return 0
-  elif [ -n "$repo_var_fallback" ]; then
-    printf '%s' "$repo_var_fallback"
-    return 0
-  else
-    return 1
+here=$(cd "$(dirname "$0")" && pwd)
+wf="$here/../.github/workflows/agent-router.yml"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# Extract each copy of the step's run block (dedented) into $work/step-N.sh.
+awk -v dir="$work" '
+  /- name: Resolve project CA cert \(registry primary, repo-var fallback\)/ { n++; infound=1; inrun=0; next }
+  infound && /^        run: \|/ { inrun=1; next }
+  inrun && /^      - name:/ { infound=0; inrun=0 }
+  inrun { sub(/^          /, ""); print > (dir "/step-" n ".sh") }
+' "$wf"
+
+copies=$(ls "$work"/step-*.sh 2>/dev/null | wc -l | tr -d ' ')
+if [ "$copies" -lt 1 ]; then
+  echo "FAIL: no CA-resolution step extracted from $wf" >&2
+  exit 1
+fi
+for f in "$work"/step-*.sh; do
+  if ! cmp -s "$work/step-1.sh" "$f"; then
+    echo "FAIL: CA-resolution step copies differ ($f vs step-1.sh)" >&2
+    exit 1
   fi
-}
+done
+echo "ok: $copies copies of the step are identical"
+
+# Fake gh: behaviour chosen by FAKE_GH_MODE.
+mkdir -p "$work/bin"
+cat > "$work/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$FAKE_GH_MODE" in
+  200)   printf '%s' "REGISTRY-PEM"; exit 0 ;;
+  empty) exit 0 ;;
+  404)   echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+  401)   echo "gh: Bad credentials (HTTP 401)" >&2; echo "second line" >&2; exit 1 ;;
+  net)   echo "error connecting to api.github.com" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$work/bin/gh"
 
 fail=0
-check() {
-  local description=$1 expected_rc=$2 expected_out=$3 registry_ca=$4 repo_var_fallback=$5
-  local actual_out actual_rc
-  if actual_out=$(resolve_ca "$registry_ca" "$repo_var_fallback"); then
-    actual_rc=0
-  else
-    actual_rc=$?
-  fi
-  if [ "$actual_rc" = "$expected_rc" ] && [ "$actual_out" = "$expected_out" ]; then
-    echo "ok: $description — rc=$actual_rc out='$actual_out'"
-  else
-    echo "FAIL: $description — expected rc=$expected_rc out='$expected_out', got rc=$actual_rc out='$actual_out'" >&2
-    fail=1
-  fi
+LAST_CODE=0; LAST_OUT=""; LAST_PEM=""
+
+# $1=script $2=gh mode $3=fallback value
+run_step() {
+  local script=$1 mode=$2 fallback=$3
+  local go="$work/gh-output" tmp="$work/tmp"
+  mkdir -p "$tmp"; : > "$go"
+  set +e
+  LAST_OUT=$(
+    PATH="$work/bin:$PATH" FAKE_GH_MODE="$mode" RUNNER_TEMP="$tmp" GITHUB_OUTPUT="$go" \
+    PROJECT_SEG="MACF" REG_PATH="repos/o/r" PROJECT_CA_CERT_REPO_VAR_FALLBACK="$fallback" \
+    bash "$script" 2>&1
+  )
+  LAST_CODE=$?
+  set -e
+  local p; p=$(sed -n 's/^path=//p' "$go")
+  LAST_PEM=""
+  if [ -n "$p" ] && [ -f "$p" ]; then LAST_PEM=$(cat "$p"); fi
 }
 
-# 1. Registry hit, repo-var ALSO set — registry wins (primary source).
-check 'registry-hit → registry value wins even with repo-var fallback set' \
-  0 'REGISTRY-PEM' \
-  'REGISTRY-PEM' 'REPO-VAR-PEM'
+expect() {
+  local desc=$1 code=$2 pem=$3 needle=$4
+  if [ "$LAST_CODE" -ne "$code" ] || [ "$LAST_PEM" != "$pem" ]; then
+    echo "FAIL: $desc — rc=$LAST_CODE pem='$LAST_PEM' (want rc=$code pem='$pem')" >&2
+    echo "$LAST_OUT" | sed 's/^/  | /' >&2
+    fail=1; return
+  fi
+  case "$LAST_OUT" in
+    *"$needle"*) echo "ok: $desc" ;;
+    *) echo "FAIL: $desc — output lacks '$needle'" >&2
+       echo "$LAST_OUT" | sed 's/^/  | /' >&2; fail=1 ;;
+  esac
+}
 
-# 2. Registry hit, no repo-var set — registry wins (the common
-#    post-migration case: nothing to fall back to, doesn't matter).
-check 'registry-hit → registry value wins with no repo-var set' \
-  0 'REGISTRY-PEM' \
-  'REGISTRY-PEM' ''
+S="$work/step-1.sh"
 
-# 3. Registry miss, repo-var set — falls back (transitional case).
-check 'registry-miss + repo-var-set → falls back to repo var' \
-  0 'REPO-VAR-PEM' \
-  '' 'REPO-VAR-PEM'
+run_step "$S" 200 "REPO-VAR-PEM"
+expect "200 -> registry wins even with a fallback set" 0 "REGISTRY-PEM" "resolved from registry"
 
-# 4. Both empty — loud failure (non-zero exit, no CA written).
-check 'both-empty → loud failure, no CA resolved' \
-  1 '' \
-  '' ''
+run_step "$S" 404 "REPO-VAR-PEM"
+expect "404 -> repo-var fallback with the warning" 0 "REPO-VAR-PEM" "transitional per-repo"
+
+run_step "$S" 401 "REPO-VAR-PEM"
+expect "401 -> exit 1, no fallback" 1 "" "Could not read MACF_CA_CERT from the registry (gh: Bad credentials (HTTP 401)); refusing to guess."
+
+run_step "$S" net "REPO-VAR-PEM"
+expect "network failure -> exit 1, no fallback" 1 "" "refusing to guess"
+
+run_step "$S" empty "REPO-VAR-PEM"
+expect "200 with empty value -> fallback, as a miss" 0 "REPO-VAR-PEM" "transitional per-repo"
+
+run_step "$S" empty ""
+expect "empty value, no fallback -> loud failure" 1 "" "CA cert not found in the registry"
+
+run_step "$S" 404 ""
+expect "404, no fallback -> loud failure" 1 "" "CA cert not found in the registry"
+
+# Mutation: every failure is a miss again (the pre-fix behaviour). The 401 case
+# must then take the fallback instead of failing.
+sed 's/if \[ "\$REG_RC" -ne 0 \] && ! grep -q .HTTP 404. "\$REG_ERR"; then/if false; then/' "$S" > "$work/mutant.sh"
+if cmp -s "$S" "$work/mutant.sh"; then
+  echo "FAIL: mutation did not change the step (sed pattern stale)" >&2
+  fail=1
+else
+  run_step "$work/mutant.sh" 401 "REPO-VAR-PEM"
+  if [ "$LAST_CODE" -eq 0 ] && [ "$LAST_PEM" = "REPO-VAR-PEM" ]; then
+    echo "ok: mutant (all failures are misses) silently falls back on a 401 — the 401 case is a real guard"
+  else
+    echo "FAIL: mutant did not reproduce the silent fallback (rc=$LAST_CODE pem='$LAST_PEM')" >&2
+    fail=1
+  fi
+fi
 
 if [ "$fail" -ne 0 ]; then
-  echo "" >&2
-  echo "FAIL: ca-cert-resolution canonical-vector test failed" >&2
+  echo "FAIL: ca-cert-resolution test failed" >&2
   exit 1
 fi
 echo "all ok"
