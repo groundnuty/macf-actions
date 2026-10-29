@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Fixed
+
+- **The router tells the sender about a registry miss** (`groundnuty/macf#1525`). When the
+  mention, CI-completion or PR-review-state route found no registry entry for an agent, it
+  logged a plain line and the job stayed green, so nobody knew the message was lost. Each now
+  emits `::warning::Registry miss for <agent> (<VAR>); not delivered` and posts one comment to
+  the sender saying the agent is not registered and its channel server is probably not running.
+  The comment is deduped per agent and item with a hidden `macf-registry-miss` marker, writes the
+  agent handle in backticks so it cannot re-route, and does not add `agent-offline` (on these
+  routes the item may belong to someone else). The job still ends green.
+- **A mention written without `[bot]` is no longer dropped silently.** `@<agent>` or
+  `@<app-name>` outside code is logged as a notice and answered once (marker `macf-near-miss`)
+  with a did-you-mean comment. It is still not routed.
+- **`actions/checkout` is on a Node 24 release** (v6.0.2, pinned by SHA) in `agent-router.yml`,
+  which removes the Node 20 deprecation warning on every run. `create-github-app-token` keeps
+  `app-id`: the routing secrets supply an App ID, not a client ID.
+
 ## [3.6.2] — 2026-10-17
 
 ### Fixed
