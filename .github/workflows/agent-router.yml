@@ -436,7 +436,7 @@ jobs:
       agents: ${{ steps.load.outputs.agents }}
       project-seg: ${{ steps.compute.outputs.project-seg }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           sparse-checkout: .github/agent-config.json
           sparse-checkout-cone-mode: false
@@ -1231,6 +1231,9 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          # Writes comments (registry-miss / near-miss notices); the registry
+          # lookup overrides GH_TOKEN inline with REG_TOKEN.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REG_TOKEN: ${{ steps.registry-token.outputs.token }}
           REG_PATH: ${{ inputs.registry-api-path }}
           CA_CERT_PATH: ${{ steps.ca-cert.outputs.path }}
@@ -1272,6 +1275,66 @@ jobs:
             { print }
           ' | sed -E 's/`[^`]*`//g')
 
+          # >>> registry_miss_notify (identical in route-by-mention, route-by-ci-completion and route-by-pr-review-state; test/registry-miss-notify.sh)
+          registry_miss_notify() { # agent var number actor
+            local agent="$1" var="$2" num="$3" actor="$4" marker existing body
+            marker="<!-- macf-registry-miss:${agent} -->"
+            echo "::warning::Registry miss for ${agent} (${var}); not delivered"
+            [ -n "$num" ] && [ -n "$actor" ] || return 0
+            existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
+            if grep -qF -e "$marker" <<<"$existing"; then
+              echo "Registry-miss comment for ${agent} already on #${num}; not posting another"
+              return 0
+            fi
+            body="@${actor} \`${agent}\` is not registered, so it did not receive this. Its channel server is probably not running; tell the operator.
+          ${marker}"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
+              || echo "::warning::Could not post the registry-miss comment for ${agent} on #${num}"
+          }
+          registry_lookup_failed() { # agent var number actor error-line
+            local agent="$1" var="$2" num="$3" actor="$4" err="$5" marker existing body
+            marker="<!-- macf-registry-lookup-failed:${agent} -->"
+            echo "::warning::Registry lookup for ${agent} (${var}) failed: ${err}; not delivered"
+            [ -n "$num" ] && [ -n "$actor" ] || return 0
+            existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
+            if grep -qF -e "$marker" <<<"$existing"; then
+              return 0
+            fi
+            body="@${actor} \`${agent}\` did not receive this: the router could not read the registry (a GitHub API error). Try again; if it repeats, tell the operator.
+          ${marker}"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
+              || echo "::warning::Could not post the registry-lookup comment for ${agent} on #${num}"
+          }
+          # <<< registry_miss_notify
+
+          # >>> near_miss_notify (route-by-mention only; test/registry-miss-notify.sh)
+          # A handle written without [bot] ("@name") is not routed: agents' own hook
+          # blocks that form as a typo. Tell the sender instead of dropping it silently.
+          near_miss_handle() { # cleaned-body name -> prints the name if "@name" appears un-suffixed
+            local esc stripped
+            # shellcheck disable=SC2016  # the sed program is literal
+            esc=$(printf '%s' "$2" | sed -E 's/[].[\*^$(){}+?|]/\\&/g')
+            stripped=$(printf '%s' "$1" | sed -E "s/@${esc}\\[bot\\]//g")
+            if printf '%s' "$stripped" | grep -qE "(^|[^A-Za-z0-9_@-])@${esc}(\$|[^A-Za-z0-9_-])"; then
+              printf '%s' "$2"
+            fi
+          }
+          near_miss_notify() { # agent handle number actor
+            local agent="$1" handle="$2" num="$3" actor="$4" marker existing body
+            marker="<!-- macf-near-miss:${agent} -->"
+            echo "::notice::near-miss mention @${handle} without [bot]; not routed"
+            [ -n "$num" ] && [ -n "$actor" ] || return 0
+            existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
+            if grep -qF -e "$marker" <<<"$existing"; then
+              return 0
+            fi
+            body="@${actor} \`@${handle}\` was not routed because a mention needs the \`[bot]\` suffix. Did you mean \`@${handle}[bot]\`?
+          ${marker}"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
+              || echo "::warning::Could not post the near-miss comment for ${agent} on #${num}"
+          }
+          # <<< near_miss_notify
+
           TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
           cp "$CA_CERT_PATH" "$TMPDIR/ca.pem"
           echo "$ROUTING_CLIENT_CERT" | base64 -d > "$TMPDIR/c.pem"
@@ -1281,6 +1344,16 @@ jobs:
           for AGENT_NAME in $(echo "$AGENTS" | jq -r 'keys[]'); do
             APP_NAME=$(echo "$AGENTS" | jq -r --arg a "$AGENT_NAME" '.[$a].app_name // empty')
             [ "$ACTOR" = "${APP_NAME}[bot]" ] && continue
+
+            # Near-miss: "@name" / "@app-name" without [bot] is not routed;
+            # say so to the sender, once per item per agent.
+            for NM in "$AGENT_NAME" "$APP_NAME"; do
+              [ -n "$NM" ] || continue
+              if [ -n "$(near_miss_handle "$BODY_CLEAN" "$NM")" ]; then
+                near_miss_notify "$AGENT_NAME" "$NM" "$VIEW_NUM" "$ACTOR"
+                break
+              fi
+            done
 
             # #58: on a pull_request_review event, route-by-pr-review-state
             # (which runs first per this job's needs:) already routed a
@@ -1320,11 +1393,16 @@ jobs:
               VAR_NAME="${PROJECT_SEG}_AGENT_${AGENT_SEG}"
 
               set +e
-              ENTRY=$(GH_TOKEN="$REG_TOKEN" gh api "${REG_PATH}/actions/variables/${VAR_NAME}" --jq '.value' 2>/dev/null)
+              ENTRY=$(GH_TOKEN="$REG_TOKEN" gh api "${REG_PATH}/actions/variables/${VAR_NAME}" --jq '.value' 2>"${RUNNER_TEMP:-/tmp}/macf-reg-err")
               API_RC=$?
               set -e
+              # Only a 404 means the agent is not registered; any other failure is a lookup error.
+              if [ "$API_RC" -ne 0 ] && ! grep -q 'HTTP 404' "${RUNNER_TEMP:-/tmp}/macf-reg-err"; then
+                registry_lookup_failed "$AGENT_NAME" "$VAR_NAME" "$VIEW_NUM" "$ACTOR" "$(head -n1 "${RUNNER_TEMP:-/tmp}/macf-reg-err")"
+                continue
+              fi
               if [ "$API_RC" -ne 0 ] || [ -z "$ENTRY" ]; then
-                echo "Registry miss for ${AGENT_NAME} (${VAR_NAME}); skipping mention route"
+                registry_miss_notify "$AGENT_NAME" "$VAR_NAME" "$VIEW_NUM" "$ACTOR"
                 continue
               fi
               HOST=$(echo "$ENTRY" | jq -r '.host // empty')
@@ -1670,8 +1748,41 @@ jobs:
           REG_TOKEN: ${{ steps.registry-token.outputs.token }}
           REG_PATH: ${{ inputs.registry-api-path }}
           CA_CERT_PATH: ${{ steps.ca-cert.outputs.path }}
+          TRIGGER_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
+
+          # >>> registry_miss_notify (identical in route-by-mention, route-by-ci-completion and route-by-pr-review-state; test/registry-miss-notify.sh)
+          registry_miss_notify() { # agent var number actor
+            local agent="$1" var="$2" num="$3" actor="$4" marker existing body
+            marker="<!-- macf-registry-miss:${agent} -->"
+            echo "::warning::Registry miss for ${agent} (${var}); not delivered"
+            [ -n "$num" ] && [ -n "$actor" ] || return 0
+            existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
+            if grep -qF -e "$marker" <<<"$existing"; then
+              echo "Registry-miss comment for ${agent} already on #${num}; not posting another"
+              return 0
+            fi
+            body="@${actor} \`${agent}\` is not registered, so it did not receive this. Its channel server is probably not running; tell the operator.
+          ${marker}"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
+              || echo "::warning::Could not post the registry-miss comment for ${agent} on #${num}"
+          }
+          registry_lookup_failed() { # agent var number actor error-line
+            local agent="$1" var="$2" num="$3" actor="$4" err="$5" marker existing body
+            marker="<!-- macf-registry-lookup-failed:${agent} -->"
+            echo "::warning::Registry lookup for ${agent} (${var}) failed: ${err}; not delivered"
+            [ -n "$num" ] && [ -n "$actor" ] || return 0
+            existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
+            if grep -qF -e "$marker" <<<"$existing"; then
+              return 0
+            fi
+            body="@${actor} \`${agent}\` did not receive this: the router could not read the registry (a GitHub API error). Try again; if it repeats, tell the operator.
+          ${marker}"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
+              || echo "::warning::Could not post the registry-lookup comment for ${agent} on #${num}"
+          }
+          # <<< registry_miss_notify
 
           case "$CHECK_SUITE_CONCLUSION" in
             success|failure|timed_out|action_required) ;;
@@ -1721,11 +1832,16 @@ jobs:
             AGENT_SEG=$(printf '%s' "$AGENT_NAME" | tr '[:lower:]-' '[:upper:]_')
             VAR_NAME="${PROJECT_SEG}_AGENT_${AGENT_SEG}"
             set +e
-            ENTRY=$(GH_TOKEN="$REG_TOKEN" gh api "${REG_PATH}/actions/variables/${VAR_NAME}" --jq '.value' 2>/dev/null)
+            ENTRY=$(GH_TOKEN="$REG_TOKEN" gh api "${REG_PATH}/actions/variables/${VAR_NAME}" --jq '.value' 2>"${RUNNER_TEMP:-/tmp}/macf-reg-err")
             API_RC=$?
             set -e
+            # Only a 404 means the agent is not registered; any other failure is a lookup error.
+            if [ "$API_RC" -ne 0 ] && ! grep -q 'HTTP 404' "${RUNNER_TEMP:-/tmp}/macf-reg-err"; then
+              registry_lookup_failed "$AGENT_NAME" "$VAR_NAME" "$PR_NUMBER" "$TRIGGER_ACTOR" "$(head -n1 "${RUNNER_TEMP:-/tmp}/macf-reg-err")"
+              continue
+            fi
             if [ "$API_RC" -ne 0 ] || [ -z "$ENTRY" ]; then
-              echo "Registry miss for ${AGENT_NAME} (${VAR_NAME}); skipping CI-completion route"
+              registry_miss_notify "$AGENT_NAME" "$VAR_NAME" "$PR_NUMBER" "$TRIGGER_ACTOR"
               continue
             fi
             HOST=$(echo "$ENTRY" | jq -r '.host // empty')
@@ -2108,6 +2224,38 @@ jobs:
           set -euo pipefail
           set -f  # macf#56: disable globbing — reviewer/requested logins contain `[bot]`; the unquoted `for login in $…_LOGINS` loops below must not glob-expand it
 
+          # >>> registry_miss_notify (identical in route-by-mention, route-by-ci-completion and route-by-pr-review-state; test/registry-miss-notify.sh)
+          registry_miss_notify() { # agent var number actor
+            local agent="$1" var="$2" num="$3" actor="$4" marker existing body
+            marker="<!-- macf-registry-miss:${agent} -->"
+            echo "::warning::Registry miss for ${agent} (${var}); not delivered"
+            [ -n "$num" ] && [ -n "$actor" ] || return 0
+            existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
+            if grep -qF -e "$marker" <<<"$existing"; then
+              echo "Registry-miss comment for ${agent} already on #${num}; not posting another"
+              return 0
+            fi
+            body="@${actor} \`${agent}\` is not registered, so it did not receive this. Its channel server is probably not running; tell the operator.
+          ${marker}"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
+              || echo "::warning::Could not post the registry-miss comment for ${agent} on #${num}"
+          }
+          registry_lookup_failed() { # agent var number actor error-line
+            local agent="$1" var="$2" num="$3" actor="$4" err="$5" marker existing body
+            marker="<!-- macf-registry-lookup-failed:${agent} -->"
+            echo "::warning::Registry lookup for ${agent} (${var}) failed: ${err}; not delivered"
+            [ -n "$num" ] && [ -n "$actor" ] || return 0
+            existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
+            if grep -qF -e "$marker" <<<"$existing"; then
+              return 0
+            fi
+            body="@${actor} \`${agent}\` did not receive this: the router could not read the registry (a GitHub API error). Try again; if it repeats, tell the operator.
+          ${marker}"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
+              || echo "::warning::Could not post the registry-lookup comment for ${agent} on #${num}"
+          }
+          # <<< registry_miss_notify
+
           # ── Build the recipient set (macf#62 — full Instance-13
           # closure): {author} ∪ {body-@mentioned} ∪ {formal reviewers}
           # ∪ {requested reviewers}. All four sources fold into the
@@ -2247,11 +2395,16 @@ jobs:
             VAR_NAME="${PROJECT_SEG}_AGENT_${AGENT_SEG}"
 
             set +e
-            ENTRY=$(GH_TOKEN="$REG_TOKEN" gh api "${REG_PATH}/actions/variables/${VAR_NAME}" --jq '.value' 2>/dev/null)
+            ENTRY=$(GH_TOKEN="$REG_TOKEN" gh api "${REG_PATH}/actions/variables/${VAR_NAME}" --jq '.value' 2>"${RUNNER_TEMP:-/tmp}/macf-reg-err")
             API_RC=$?
             set -e
+            # Only a 404 means the agent is not registered; any other failure is a lookup error.
+            if [ "$API_RC" -ne 0 ] && ! grep -q 'HTTP 404' "${RUNNER_TEMP:-/tmp}/macf-reg-err"; then
+              registry_lookup_failed "$AGENT_NAME" "$VAR_NAME" "$PR_NUMBER" "$REVIEWER_LOGIN" "$(head -n1 "${RUNNER_TEMP:-/tmp}/macf-reg-err")"
+              continue
+            fi
             if [ "$API_RC" -ne 0 ] || [ -z "$ENTRY" ]; then
-              echo "Registry miss for ${AGENT_NAME} (${VAR_NAME}); skipping pr_review_state route"
+              registry_miss_notify "$AGENT_NAME" "$VAR_NAME" "$PR_NUMBER" "$REVIEWER_LOGIN"
               continue
             fi
             HOST=$(echo "$ENTRY" | jq -r '.host // empty')
