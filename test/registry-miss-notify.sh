@@ -28,7 +28,8 @@ extract_all() { # name -> blocks separated by a NUL-free marker line
     on { sub(/^          /, ""); print }
   ' "$WF"
 }
-first_block() { extract_all "$1" | awk '/=====BLOCK-END=====/ {exit} {print}'; }
+# Read every line (no early exit): under pipefail an early-exiting reader can SIGPIPE the writer.
+first_block() { extract_all "$1" | awk 'done {next} /=====BLOCK-END=====/ {done=1; next} {print}'; }
 
 REG=$(first_block registry_miss_notify)
 NEAR=$(first_block near_miss_notify)
@@ -74,7 +75,7 @@ run_fn() { # fn args... ; env EXISTING
 
 # 1. first miss: warning + exactly one comment
 out=$(EXISTING="" run_fn registry_miss_notify code-agent ACME_AGENT_CODE_AGENT 12 alice 2>&1)
-echo "$out" | grep -qF '::warning::Registry miss for code-agent (ACME_AGENT_CODE_AGENT); not delivered' \
+grep -qF '::warning::Registry miss for code-agent (ACME_AGENT_CODE_AGENT); not delivered' <<<"$out" \
   && ok "miss prints the warning" || bad "miss warning missing: $out"
 n=$(grep -c '^COMMENT#' "$CALLS" || true)
 [ "$n" = 1 ] && ok "exactly one comment built" || bad "comments built: $n (want 1)"
@@ -87,7 +88,7 @@ if grep -qE '@[A-Za-z0-9_-]+\[bot\]' "$CALLS"; then bad "comment has a raw bot m
 out=$(EXISTING="earlier text <!-- macf-registry-miss:code-agent --> more" run_fn registry_miss_notify code-agent ACME_AGENT_CODE_AGENT 12 alice 2>&1)
 n=$(grep -c '^COMMENT#' "$CALLS" || true)
 [ "$n" = 0 ] && ok "second miss builds no comment" || bad "second miss built $n comments"
-echo "$out" | grep -qF '::warning::Registry miss' && ok "second miss still warns" || bad "second miss lost the warning"
+grep -qF '::warning::Registry miss' <<<"$out" && ok "second miss still warns" || bad "second miss lost the warning"
 
 # a different agent's marker does not suppress this agent's comment
 EXISTING="<!-- macf-registry-miss:science-agent -->" run_fn registry_miss_notify code-agent V 12 alice >/dev/null 2>&1
@@ -123,12 +124,28 @@ nm 'nothing here' code-agent none "no mention at all"
 
 : > "$CALLS"
 out=$(EXISTING="" run_fn near_miss_notify code-agent code-agent 7 bob 2>&1)
-echo "$out" | grep -qF '::notice::near-miss mention @code-agent without [bot]; not routed' && ok "near-miss prints the notice" || bad "near-miss notice missing"
+grep -qF '::notice::near-miss mention @code-agent without [bot]; not routed' <<<"$out" && ok "near-miss prints the notice" || bad "near-miss notice missing"
 n=$(grep -c '^COMMENT#' "$CALLS" || true); [ "$n" = 1 ] && ok "near-miss builds one comment" || bad "near-miss comments: $n"
 grep -q '^@bob ' "$CALLS" && grep -qF '<!-- macf-near-miss:code-agent -->' "$CALLS" && ok "near-miss comment addressed to sender, with marker" || bad "near-miss comment shape"
 grep -E '@code-agent\[bot\]' "$CALLS" | grep -vq '`@code-agent\[bot\]`' && bad "near-miss comment has an unbackticked bot mention" || ok "near-miss suggestion is backticked"
 EXISTING="<!-- macf-near-miss:code-agent -->" run_fn near_miss_notify code-agent code-agent 7 bob >/dev/null 2>&1
 n=$(grep -c '^COMMENT#' "$CALLS" || true); [ "$n" = 0 ] && ok "near-miss deduped by marker" || bad "near-miss not deduped ($n)"
+
+# A lookup error that is not a 404 must not claim the agent is unregistered.
+LOOK=$(first_block registry_miss_notify)
+[ -n "$LOOK" ] && grep -q 'registry_lookup_failed()' <<<"$LOOK" && ok "registry_lookup_failed is in the shared block" || bad "registry_lookup_failed missing from the shared block"
+n404=$(grep -cF "grep -q 'HTTP 404' \"\${RUNNER_TEMP:-/tmp}/macf-reg-err\"" "$WF" || true)
+[ "$n404" = 3 ] && ok "3 lookups tell a 404 apart from other errors" || bad "404 checks: $n404 (want 3)"
+nfail=$(grep -c 'registry_lookup_failed "\$AGENT_NAME" "\$VAR_NAME"' "$WF" || true)
+[ "$nfail" = 3 ] && ok "3 routes call registry_lookup_failed" || bad "registry_lookup_failed calls: $nfail (want 3)"
+out=$(EXISTING="" run_fn registry_lookup_failed code-agent ACME_AGENT_CODE_AGENT 12 alice "HTTP 502: Bad Gateway" 2>&1)
+grep -qF '::warning::Registry lookup for code-agent (ACME_AGENT_CODE_AGENT) failed: HTTP 502: Bad Gateway; not delivered' <<<"$out" \
+  && ok "lookup failure warns with the error" || bad "lookup failure warning missing"
+n=$(grep -c '^COMMENT#' "$CALLS" || true); [ "$n" = 1 ] && ok "lookup failure builds one comment" || bad "lookup-failure comments: $n"
+grep -qF 'could not read the registry' "$CALLS" && ! grep -qF 'is not registered' "$CALLS" \
+  && ok "lookup-failure comment does not claim the agent is unregistered" || bad "lookup-failure comment wording"
+EXISTING="<!-- macf-registry-lookup-failed:code-agent -->" run_fn registry_lookup_failed code-agent V 12 alice "x" >/dev/null 2>&1
+n=$(grep -c '^COMMENT#' "$CALLS" || true); [ "$n" = 0 ] && ok "lookup-failure comment deduped by marker" || bad "lookup-failure not deduped ($n)"
 
 # Mutation (only when not already running against a mutated copy): restore the
 # old silent skip in the mention route; this test must now FAIL.
@@ -139,7 +156,7 @@ if [ -z "${MUTATED:-}" ]; then
   echo "-- mutation (expect FAIL below) --"
   mut_out=$(MUTATED=1 WF="$MUT_WF" bash "$0" 2>&1 || true)
   printf '%s\n' "$mut_out" | grep 'FAIL' | sed 's/^/   | /'
-  if printf '%s\n' "$mut_out" | grep -q '^FAIL'; then
+  if grep -q '^FAIL' <<<"$mut_out"; then
     ok "mutation detected"
   else
     bad "mutation was not detected"
