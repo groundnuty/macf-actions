@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [3.6.3] — 2026-10-29
+
 ### Fixed
 
 - **The router tells the sender about a registry miss** (`groundnuty/macf#1525`). When the
@@ -17,6 +19,11 @@ All notable changes to this project will be documented in this file. The format 
 - **A mention written without `[bot]` is no longer dropped silently.** `@<agent>` or
   `@<app-name>` outside code is logged as a notice and answered once (marker `macf-near-miss`)
   with a did-you-mean comment. It is still not routed.
+- **A registry lookup error is not reported as an unregistered agent.** Only a 404 means the
+  agent is not registered; any other failure gets its own `::warning::` and a comment saying the
+  registry could not be read (marker `macf-registry-lookup-failed`).
+- **Notices are posted through the REST issues-comments endpoint,** so `issues: write` covers
+  pull requests too; callers need no new permission.
 - **`actions/checkout` is on a Node 24 release** (v6.0.2, pinned by SHA) in `agent-router.yml`,
   which removes the Node 20 deprecation warning on every run. `create-github-app-token` keeps
   `app-id`: the routing secrets supply an App ID, not a client ID.
