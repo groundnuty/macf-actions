@@ -60,11 +60,14 @@ run_fn() { # fn args... ; env EXISTING
     gh() {
       case "$1 $2" in
         "api repos/o/r/issues/"*) printf '%s' "${EXISTING:-}" ;;
-        "issue comment") shift 2; local num="$1"; shift
-                         while [ $# -gt 0 ]; do
-                           [ "$1" = "--body" ] && { printf 'COMMENT#%s\n%s\n--END--\n' "$num" "$2" >> "$CALLS"; }
-                           shift
-                         done ;;
+        "api -X") # POST repos/o/r/issues/<n>/comments -f body=<text>
+                  local path="$4" num
+                  num=${path#repos/o/r/issues/}; num=${num%/comments}
+                  shift 4
+                  while [ $# -gt 0 ]; do
+                    [ "$1" = "-f" ] && case "$2" in body=*) printf 'COMMENT#%s\n%s\n--END--\n' "$num" "${2#body=}" >> "$CALLS" ;; esac
+                    shift
+                  done ;;
         *) echo "unexpected gh $*" >&2; return 99 ;;
       esac
     }

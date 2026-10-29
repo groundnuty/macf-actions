@@ -1282,13 +1282,13 @@ jobs:
             echo "::warning::Registry miss for ${agent} (${var}); not delivered"
             [ -n "$num" ] && [ -n "$actor" ] || return 0
             existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
-            if printf '%s' "$existing" | grep -qF -e "$marker"; then
+            if grep -qF -e "$marker" <<<"$existing"; then
               echo "Registry-miss comment for ${agent} already on #${num}; not posting another"
               return 0
             fi
             body="@${actor} \`${agent}\` is not registered, so it did not receive this. Its channel server is probably not running; tell the operator.
           ${marker}"
-            gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$body" \
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
               || echo "::warning::Could not post the registry-miss comment for ${agent} on #${num}"
           }
           registry_lookup_failed() { # agent var number actor error-line
@@ -1297,12 +1297,12 @@ jobs:
             echo "::warning::Registry lookup for ${agent} (${var}) failed: ${err}; not delivered"
             [ -n "$num" ] && [ -n "$actor" ] || return 0
             existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
-            if printf '%s' "$existing" | grep -qF -e "$marker"; then
+            if grep -qF -e "$marker" <<<"$existing"; then
               return 0
             fi
             body="@${actor} \`${agent}\` did not receive this: the router could not read the registry (a GitHub API error). Try again; if it repeats, tell the operator.
           ${marker}"
-            gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$body" \
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
               || echo "::warning::Could not post the registry-lookup comment for ${agent} on #${num}"
           }
           # <<< registry_miss_notify
@@ -1325,12 +1325,12 @@ jobs:
             echo "::notice::near-miss mention @${handle} without [bot]; not routed"
             [ -n "$num" ] && [ -n "$actor" ] || return 0
             existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
-            if printf '%s' "$existing" | grep -qF -e "$marker"; then
+            if grep -qF -e "$marker" <<<"$existing"; then
               return 0
             fi
             body="@${actor} \`@${handle}\` was not routed because a mention needs the \`[bot]\` suffix. Did you mean \`@${handle}[bot]\`?
           ${marker}"
-            gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$body" \
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
               || echo "::warning::Could not post the near-miss comment for ${agent} on #${num}"
           }
           # <<< near_miss_notify
@@ -1759,13 +1759,13 @@ jobs:
             echo "::warning::Registry miss for ${agent} (${var}); not delivered"
             [ -n "$num" ] && [ -n "$actor" ] || return 0
             existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
-            if printf '%s' "$existing" | grep -qF -e "$marker"; then
+            if grep -qF -e "$marker" <<<"$existing"; then
               echo "Registry-miss comment for ${agent} already on #${num}; not posting another"
               return 0
             fi
             body="@${actor} \`${agent}\` is not registered, so it did not receive this. Its channel server is probably not running; tell the operator.
           ${marker}"
-            gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$body" \
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
               || echo "::warning::Could not post the registry-miss comment for ${agent} on #${num}"
           }
           registry_lookup_failed() { # agent var number actor error-line
@@ -1774,12 +1774,12 @@ jobs:
             echo "::warning::Registry lookup for ${agent} (${var}) failed: ${err}; not delivered"
             [ -n "$num" ] && [ -n "$actor" ] || return 0
             existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
-            if printf '%s' "$existing" | grep -qF -e "$marker"; then
+            if grep -qF -e "$marker" <<<"$existing"; then
               return 0
             fi
             body="@${actor} \`${agent}\` did not receive this: the router could not read the registry (a GitHub API error). Try again; if it repeats, tell the operator.
           ${marker}"
-            gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$body" \
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
               || echo "::warning::Could not post the registry-lookup comment for ${agent} on #${num}"
           }
           # <<< registry_miss_notify
@@ -2231,13 +2231,13 @@ jobs:
             echo "::warning::Registry miss for ${agent} (${var}); not delivered"
             [ -n "$num" ] && [ -n "$actor" ] || return 0
             existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
-            if printf '%s' "$existing" | grep -qF -e "$marker"; then
+            if grep -qF -e "$marker" <<<"$existing"; then
               echo "Registry-miss comment for ${agent} already on #${num}; not posting another"
               return 0
             fi
             body="@${actor} \`${agent}\` is not registered, so it did not receive this. Its channel server is probably not running; tell the operator.
           ${marker}"
-            gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$body" \
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
               || echo "::warning::Could not post the registry-miss comment for ${agent} on #${num}"
           }
           registry_lookup_failed() { # agent var number actor error-line
@@ -2246,12 +2246,12 @@ jobs:
             echo "::warning::Registry lookup for ${agent} (${var}) failed: ${err}; not delivered"
             [ -n "$num" ] && [ -n "$actor" ] || return 0
             existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
-            if printf '%s' "$existing" | grep -qF -e "$marker"; then
+            if grep -qF -e "$marker" <<<"$existing"; then
               return 0
             fi
             body="@${actor} \`${agent}\` did not receive this: the router could not read the registry (a GitHub API error). Try again; if it repeats, tell the operator.
           ${marker}"
-            gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$body" \
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${num}/comments" -f body="$body" >/dev/null \
               || echo "::warning::Could not post the registry-lookup comment for ${agent} on #${num}"
           }
           # <<< registry_miss_notify
